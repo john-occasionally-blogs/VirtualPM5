@@ -119,7 +119,7 @@ armFreshPieceGate (Concept2Manager.swift:183-208 region) documents hardware trut
 [EVIDENCE: Shared/Concept2Manager.swift:140-208,571-624]
 
 ### ARTIFACTS
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/mock-rowing-launcharg-map.md
+<session-scratchpad>/mock-rowing-launcharg-map.md
 
 ### OPEN QUESTIONS
 - Real-hardware cadence/byte ground truth (exact CE060031/32/33 notify intervals, FTMS flag words, 0x0039/0x003A byte layouts as captured from the reference PM5) is outside this slice — the parallel capture-analysis slice should confirm the 0.5s-per-characteristic assumption implied by CE060034.
@@ -194,11 +194,11 @@ Verbatim in the artifact. Order: scan → 'Found: PM5 XXXXXXXXX Row (RSSI: -45)'
 [EVIDENCE: scratchpad/pm5-piece-250m.jsonl (meta line documents coverage); phase transitions at seq 6 (waitToBegin), 250 (intervalWorkDistance), 284 (intervalRest)]
 
 ### ARTIFACTS
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/pm5-csafe-catalog.md
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/pm5-piece-250m.jsonl
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/pm5-discovery-sequence.md
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/mine.py
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/mine-output.txt
+<session-scratchpad>/pm5-csafe-catalog.md
+<session-scratchpad>/pm5-piece-250m.jsonl
+<session-scratchpad>/pm5-discovery-sequence.md
+<session-scratchpad>/mine.py
+<session-scratchpad>/mine-output.txt
 
 ### OPEN QUESTIONS
 - Interval-piece 0x0039 sub-layout: the single interval summary (L98135: '07 35 35 15 04 1A 00 C4 09 00 53 21 00 00 00 7B 00 03 34 05') decodes to implausible spm=83/endHR=33 and wtype=3 (not 7) — bytes 10-11 may mean something else for interval workouts (or reflect the terminated zombie 4th interval); need a clean interval capture where the piece ends naturally without a rearm/terminate.
@@ -267,8 +267,8 @@ Both target files already existed in the scratchpad from an earlier pass of this
 [EVIDENCE: pm5-rirt-lifecycle.md and pm5-older-logs-truths.md in the scratchpad]
 
 ### ARTIFACTS
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/pm5-rirt-lifecycle.md
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/pm5-older-logs-truths.md
+<session-scratchpad>/pm5-rirt-lifecycle.md
+<session-scratchpad>/pm5-older-logs-truths.md
 
 ### OPEN QUESTIONS
 - Where does the '~1 min late' 0x0039 claim originate? Neither older log shows a summary later than ~3.5 s after workoutEnd — check the 2026-07-16 raw capture or whether the claim refers to UI backfill onto an already-saved result rather than BLE arrival.
@@ -340,7 +340,7 @@ Shared/WorkoutConfiguration.swift:481-514: mode {singleDistance [LEGACY NAME - s
 [EVIDENCE: Synthesis of all sections; key lines WS:7263-7270, 7586, 370-376, 1137-1139; C2M:683-686]
 
 ### ARTIFACTS
-/private/tmp/claude-501/-Users-the author-Desktop-Desktop---MacBook-Air--2--SemperClock/2b4d16bb-460d-4b16-8385-dd39d6e22b2d/scratchpad/consumer-side-map.md
+<session-scratchpad>/consumer-side-map.md
 
 ### OPEN QUESTIONS
 - Bullpen-selection-time PM5 programming (the WorkoutSyncManager call site that programs the erg BEFORE startWorkout, referenced at WS:1818-1834 and C2M:1152-1155) was not traced in this slice - the producer/selection-side slice should confirm its exact trigger and dedupe with rowProgram(for:).
