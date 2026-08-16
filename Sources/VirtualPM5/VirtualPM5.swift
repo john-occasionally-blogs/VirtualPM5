@@ -222,6 +222,21 @@ public final class VirtualPM5 {
         /// a kick (SC-flvf).
         var finishKickPace: Double = 0
         var finishKickAfterSeconds: Double = 20
+        /// SC-3wbx HR RECOVERY: once a piece is over, heart rate decays toward `hrRecoveryRestingBPM`
+        /// instead of freezing at its final value. 0 = OFF (frozen — bit-identical to today).
+        ///
+        /// The hardware truth it models: a strap keeps reporting after the piece ends and the athlete
+        /// RECOVERS — a real device capture had HR still falling 10+ minutes past completion, down to
+        /// 74 bpm from a workout max of 124. The emulator froze instead, and a frozen number cannot
+        /// drag an average anywhere, which is why the defect where a finished workout's "average"
+        /// kept sliding was invisible to every sim fixture ever run.
+        ///
+        /// Exponential toward the floor (fast at first, then slow) because that is the shape real
+        /// recovery has; `hrRecoveryTau` is the time constant in seconds. Applies only AFTER a piece
+        /// ends (ended/logged/idle) — interval REST is deliberately excluded, since changing HR there
+        /// would move existing fixtures' per-interval HR and zone-time assertions.
+        var hrRecoveryRestingBPM: Int = 0
+        var hrRecoveryTau: Double = 75
         /// Stroke rate, strokes per minute (app window: 1-59, |Δ|≤10 between frames).
         var strokeRate: Int = 24
         /// HR ramp (strap-on-PM5 model): start → peak at ~0.55 bpm/s.
@@ -440,6 +455,14 @@ public final class VirtualPM5 {
             }
             if d.object(forKey: "VirtualPM5FinishKickAfter") != nil {
                 c.finishKickAfterSeconds = min(3600, max(0, d.double(forKey: "VirtualPM5FinishKickAfter")))
+            }
+            // SC-3wbx: clamped to a plausible resting band — a "recovery" floor above the athlete's
+            // working HR would silently invert the model instead of erroring.
+            if d.integer(forKey: "VirtualPM5HRRecovery") > 0 {
+                c.hrRecoveryRestingBPM = min(120, max(30, d.integer(forKey: "VirtualPM5HRRecovery")))
+            }
+            if d.object(forKey: "VirtualPM5HRRecoveryTau") != nil {
+                c.hrRecoveryTau = min(600, max(5, d.double(forKey: "VirtualPM5HRRecoveryTau")))
             }
             if d.integer(forKey: "VirtualPM5SPM") > 0 { c.strokeRate = min(59, max(10, d.integer(forKey: "VirtualPM5SPM"))) }
             if d.integer(forKey: "VirtualPM5HRStart") > 0 { c.hrStart = d.integer(forKey: "VirtualPM5HRStart") }
@@ -755,6 +778,8 @@ public final class VirtualPM5 {
     private var finishKickAnnounced = false
     /// SC-us0r: odometer at the previous stroke, for 0x0035's per-stroke distance field.
     private var lastStrokeDistance: Double = 0
+    /// SC-3wbx: log-noise guard — recovery is announced once per session, not once per tick.
+    private var hrRecoveryAnnounced = false
     private var avgPaceAccumulator: Double = 0
     private var paceSamples: Int = 0
     private var strokeCount: Int = 0
@@ -790,7 +815,7 @@ public final class VirtualPM5 {
         self.rng = SeededRNG(state: config.seed)
         self.emit = emit
         self.onDisconnectRequest = onDisconnectRequest
-        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off")")
+        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) hrRecovery=\(config.hrRecoveryRestingBPM > 0 ? "\(config.hrRecoveryRestingBPM)bpm/tau\(Int(config.hrRecoveryTau))s" : "off") kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off")")
         if config.initialOdometerMeters > 0 {
             // P2b: leftover values from an earlier bout, visible in the idle 0x0031
             // stream and through the program-accept stale window until armed zeros
@@ -1406,6 +1431,7 @@ public final class VirtualPM5 {
             }
         }
         advancePhase()
+        applyHRRecoveryIfPiecelessAndEnabled()   // SC-3wbx
         emitGeneralStatus()
         emitAdditionalStatus1()
         emitAdditionalStatus2()   // SC-fadm: 0x0033 live additional status 2
@@ -1925,6 +1951,26 @@ public final class VirtualPM5 {
         b += u24LE(0)                                       // 14-16 last split time (modeled 0)
         b += u24LE(0)                                       // 17-19 last split dist (modeled 0)
         emit(Self.additionalStatus2UUID, Data(b))
+    }
+
+    /// SC-3wbx: decay HR toward the resting floor once the piece is over. See `Config`. The strap is
+    /// still on the athlete's chest and the erg is still streaming — only the ROWING stopped.
+    private func applyHRRecoveryIfPiecelessAndEnabled() {
+        guard config.hrRecoveryRestingBPM > 0, config.strapPresent, currentHR > 0 else { return }
+        switch phase {
+        case .ended, .logged, .idle: break
+        default: return   // rowing / armed / staleWindow / interval rest keep their existing model
+        }
+        let floor = Double(config.hrRecoveryRestingBPM)
+        guard currentHR > floor + 0.1 else { return }
+        // Exponential approach, evaluated per 0.5s tick.
+        let alpha = 1 - exp(-0.5 / config.hrRecoveryTau)
+        let before = currentHR
+        currentHR += (floor - currentHR) * alpha
+        if !hrRecoveryAnnounced {
+            hrRecoveryAnnounced = true
+            logTransition("🧪 SC-3wbx HR recovery engaged: \(Int(before)) bpm decaying toward \(Int(floor)) (tau \(Int(config.hrRecoveryTau))s) — the strap keeps reporting after the piece ends")
+        }
     }
 
     /// 0x0035 Stroke Data — the characteristic that carries the app's ONLY stroke-count source
