@@ -173,6 +173,17 @@
 //                               <m> under the 50m fresh-frame ceiling for the gate-release shape
 //                               (device truth 19.8); ≥50 exercises the gate-timeout branch
 //                               instead. 0 = OFF, bit-identical.
+//  -VirtualPM5ParkedOdometerUntilStroke  (SC-6qh6) DEVICE 2026-08-16 (real PM5, 4x500m/60s): a
+//                               freshly-armed piece parked at waitToBegin keeps REPORTING the
+//                               PREVIOUS piece's odometer — only a stroke moves the counter. The
+//                               emulator zeroes at install, so a stationary armed erg has always
+//                               looked "fresh" here and no consumer gate could ever time out on a
+//                               correctly-armed erg. With this on, the armed (waitToBegin) window
+//                               reports the ended piece's distance on the wire and the new piece's
+//                               zeros appear only at flywheel start. Assert: the arm completes
+//                               with NO recovery walk (no "Fresh-piece gate timed out — … recovery
+//                               walk"), and the eventual first accepted 0x0031 reads ARM-ODOMETER
+//                               CLEAN. OFF = bit-identical.
 //
 //  Observability: every state transition, command, and piece-official emits a
 //  "🧪 VPM5" stdout line (grep the token VPM5 in the runtime log).
@@ -431,6 +442,36 @@ public final class VirtualPM5 {
         /// bit-identical to today.
         var spindownResidualMeters: Int = 0
         var spindownResidual: Bool { spindownResidualMeters > 0 }
+        /// SC-6qh6: `-VirtualPM5ParkedOdometerUntilStroke` — the hardware truth this emulator has
+        /// been silently contradicting since P1. DEVICE-CONFIRMED 2026-08-16 (real PM5, build
+        /// 1026, 4x500m/60s): interval 3's program was ACKed and INSTALLED, and the
+        /// erg then sat in `waitToBegin` for ~18s STILL REPORTING d=500.0 — the PREVIOUS piece's
+        /// odometer. A PM5 does not zero its counter when it accepts a piece; the FIRST STROKE
+        /// does. The emulator zeroes at install (`resetPieceCounters()` inside the arm
+        /// transition), so a stationary armed erg here always emits a fresh sub-50m frame
+        /// immediately and any consumer gate keyed on the odometer releases at once. That is
+        /// precisely why five sim-green runs never saw SC-6qh6.
+        ///
+        /// Model — wire-level only, so no internal accounting shifts:
+        ///   • at each piece end the ended piece's distance is held (`parkedOdometerHold`);
+        ///   • for the whole `.armed` (waitToBegin, 0x00) window the 0x0031 DISTANCE field reports
+        ///     that held value instead of the armed zeros — frozen, exactly the device signature
+        ///     (26 identical d=500.0 frames). `elapsed` is NOT held: the captured armed frames
+        ///     already carry the post-reset clock and the device evidence is about distance.
+        ///   • at flywheel start the hold is released and the piece runs from 0 as always.
+        /// Applies to resetting natives only (distance/calorie/interval — the gate-audited set);
+        /// a TIME or Just Row arm clears the hold, since neither is ever gate-audited. Yields to
+        /// `spindownResidualMeters`, which models a DIFFERENT arm-time counter truth (install
+        /// accepted ONTO residual motion, counter then climbing from it) and would otherwise be
+        /// masked by the hold.
+        ///
+        /// Consumer assertion this knob exists to make provable: an ACK-proven install parked at
+        /// waitToBegin must arm with NO recovery walk (grep the runtime log for "Fresh-piece gate
+        /// timed out" — must be ABSENT) and the eventual first accepted 0x0031 must read
+        /// `SC-o1ur ARM-ODOMETER CLEAN`. A consumer that releases its gate on the held value
+        /// instead fails the OTHER way and phantom-completes (the SC-apma shape), so the knob
+        /// discriminates both failure modes, not just one. false = OFF, bit-identical to today.
+        var parkedOdometerUntilStroke: Bool = false
         /// SC-7nqt.2.4: `-VirtualPM5InitialState 'inProgress:<target>m@<current>m'` —
         /// the erg boots ALREADY mid-piece (a distance row `current`/`target` m in),
         /// so the app connects to a running piece it never programmed (cold adoption).
@@ -543,6 +584,10 @@ public final class VirtualPM5 {
             // flywheel meters (counter pre-load, no reset ever; one-shot).
             if d.integer(forKey: "VirtualPM5SpindownResidual") > 0 {
                 c.spindownResidualMeters = min(1_000_000, max(0, d.integer(forKey: "VirtualPM5SpindownResidual")))
+            }
+            // SC-6qh6: a parked armed erg reports the PREVIOUS piece's odometer until a stroke.
+            if d.object(forKey: "VirtualPM5ParkedOdometerUntilStroke") != nil {
+                c.parkedOdometerUntilStroke = d.bool(forKey: "VirtualPM5ParkedOdometerUntilStroke")
             }
             // SC-7nqt.2.4: cold mid-piece adoption. Format 'inProgress:500m@165m'.
             if let raw = d.string(forKey: "VirtualPM5InitialState"),
@@ -676,6 +721,12 @@ public final class VirtualPM5 {
     /// SC-qv39: one-shot latch — the residual is applied to exactly ONE arm per launch
     /// (the device night's next arm was CLEAN).
     private var spindownResidualConsumed = false
+    /// SC-6qh6 (`-VirtualPM5ParkedOdometerUntilStroke`): the ended piece's odometer, REPORTED on
+    /// the wire for the whole armed (waitToBegin) window because a real PM5 does not move its
+    /// counter until the first stroke. Set at each piece end, consumed at flywheel start. Only
+    /// the wire value is overridden — internal accounting keeps the armed zeros, so the piece
+    /// still runs from 0 and every downstream total is unchanged.
+    private var parkedOdometerHold: Double?
     /// SC-2rqd (`-VirtualPM5RowDuringRest`): ticks since the athlete last drove the flywheel
     /// inside a running piece. Maintained per-tick (tick()) so the phase walks between pieces
     /// (ended → logged → terminate → idle → armed) never reset the athlete's stroking
@@ -835,6 +886,9 @@ public final class VirtualPM5 {
         }
         if config.rowDuringRest {
             print("🧪 VPM5 🚣 row-during-rest armed (SC-2rqd): athlete resumes stroking \(String(format: "%.1f", config.rowDuringRestQuietSeconds))s after each piece ends and never stops through rest — SR stays live on 0x0032 while un-armed/parked, a program landing mid-stroke flywheel-starts IMMEDIATELY (no startDelay)")
+        }
+        if config.parkedOdometerUntilStroke {
+            print("🧪 VPM5 🅿️ parked-odometer-until-stroke ON (SC-6qh6, DEVICE 2026-08-16): an armed piece parked at waitToBegin reports the PREVIOUS piece's odometer — only the first stroke moves the counter. A correctly-armed erg therefore emits NO fresh sub-50m frame while stationary; a consumer whose fresh-piece gate walks on that timeout tears down an erg that was already armed")
         }
         if config.spindownResidual {
             print("🧪 VPM5 🌀 spindown-residual armed (SC-qv39): after the FIRST piece end, ~\(config.spindownResidualMeters)m of flywheel residual outlives the teardown; the next resetting-native install is accepted ONTO it (counter pre-load, NO reset ever; one-shot). ERG DAY 2026-08-14 d=19.8 truth")
@@ -1548,6 +1602,10 @@ public final class VirtualPM5 {
                         case .distance, .calories, .interval:
                             spindownResidualPending = false
                             spindownResidualConsumed = true
+                            // SC-6qh6: the residual models a DIFFERENT arm-time truth on the same
+                            // wire field (install accepted ONTO residual motion, counter then
+                            // climbing from it). It owns this arm; the parked hold must not mask it.
+                            parkedOdometerHold = nil
                             distance = Double(config.spindownResidualMeters)
                             elapsed = distance / 500.0 * config.paceSecondsPer500
                             print("🧪 VPM5 🌀 SPINDOWN-RESIDUAL: program (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value)) accepted ONTO the residual — counter PRE-LOADED at \(String(format: "%.1f", distance))m, NO reset will ever follow; 0x0031 climbs from the residual and the erg's own WORKOUTEND fires at counter=target (SC-qv39 ERG DAY 2026-08-14 d=19.8 shape; one-shot consumed, next arm CLEAN)")
@@ -1555,9 +1613,21 @@ public final class VirtualPM5 {
                             break
                         }
                     }
+                    // SC-6qh6: the parked-odometer hold covers RESETTING NATIVES only — the
+                    // gate-audited set. A TIME piece runs over retained counters by its own rule
+                    // and Just Row arms cumulatively; neither is ever gate-audited, so holding a
+                    // stale distance there would model nothing and would corrupt the wire.
+                    switch piece {
+                    case .time, .justRow: parkedOdometerHold = nil
+                    case .distance, .calories, .interval: break
+                    }
                     armedTicks = 0
                     phase = .armed(piece)
-                    logTransition("armed (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value))")
+                    if let hold = parkedOdometerHold {
+                        logTransition("armed (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value)) — PARKED ODOMETER: wire distance holds at \(String(format: "%.1f", hold))m until the first stroke (SC-6qh6 device truth), NOT the armed zeros")
+                    } else {
+                        logTransition("armed (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value))")
+                    }
                 case .clearToIdle:
                     resetPieceCounters()
                     workoutTypeByte = 0x01
@@ -1598,6 +1668,14 @@ public final class VirtualPM5 {
                     pieceStartDistance = 0
                 }
                 phase = .rowing(piece)
+                // SC-6qh6: the stroke that starts the flywheel is exactly what moves a real PM5's
+                // counter off the previous piece — release the hold here and the new piece's zeros
+                // finally reach the wire, which is what lets a consumer's fresh-piece gate release
+                // CLEAN instead of timing out.
+                if let hold = parkedOdometerHold {
+                    parkedOdometerHold = nil
+                    print("🧪 VPM5 🅿️ PARKED-ODOMETER released (SC-6qh6): first stroke — wire distance drops \(String(format: "%.1f", hold))m → 0.0m, the new piece's counter is finally visible")
+                }
                 if athleteAlreadyPulling, Double(armedTicks) * 0.5 < config.startDelay {
                     logTransition("flywheel start IMMEDIATE — athlete was already stroking through rest (-VirtualPM5RowDuringRest, SC-2rqd); 0x0031 meters now bank during the remaining rest window")
                 } else {
@@ -1751,6 +1829,13 @@ public final class VirtualPM5 {
         frozenDistance = distance
         slaveState = .manual  // by the time the app's GoFinished arrives, the erg self-logged
         if config.rowDuringRest { hasEndedAPieceThisSession = true }  // SC-2rqd: rest-stroking exists only BETWEEN pieces
+        // SC-6qh6 (`-VirtualPM5ParkedOdometerUntilStroke`): the head unit keeps showing THIS
+        // piece's metres while the next one sits armed at waitToBegin — only a stroke moves the
+        // counter (DEVICE 2026-08-16: 26 identical d=500.0 frames across an ~18s armed window).
+        if config.parkedOdometerUntilStroke {
+            parkedOdometerHold = distance
+            print("🧪 VPM5 🅿️ PARKED-ODOMETER hold armed (SC-6qh6): the next armed (waitToBegin) window will report d=\(String(format: "%.1f", distance))m — this piece's odometer — until the first stroke moves it")
+        }
         // SC-qv39 (`-VirtualPM5SpindownResidual`): the flywheel outlives the piece — arm the
         // residual for the next resetting-native install (one-shot; see the Config doc).
         if config.spindownResidual, !spindownResidualConsumed, !spindownResidualPending {
@@ -1844,7 +1929,11 @@ public final class VirtualPM5 {
             // Post-reset counters: 0/0 for distance/cal/JustRow (bit-identical to
             // the P1 hard zeros); RETAINED live values for TIME (never reset —
             // zero anyway after the common terminate-from-logged flow, LOG15).
-            return (elapsed, distance, 0x00, 0, 0, workoutTypeByte)
+            // SC-6qh6 (`-VirtualPM5ParkedOdometerUntilStroke`): a real PM5 does NOT move its
+            // counter when it accepts a piece — the first stroke does. While the hold is set the
+            // DISTANCE field reports the previous piece's odometer, frozen, for the whole armed
+            // window (device 2026-08-16: 26 identical d=500.0 frames). Wire-level only.
+            return (elapsed, parkedOdometerHold ?? distance, 0x00, 0, 0, workoutTypeByte)
         case .rowing:
             if terminateFlashPending { terminateFlashPending = false }
             // Captured: elapsed ticks 1-2 frames BEFORE the state byte flips. Interval WORK
