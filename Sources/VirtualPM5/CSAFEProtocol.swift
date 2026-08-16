@@ -324,16 +324,22 @@ public enum PM5CommandBuilder {
     /// above plus SET_WORKOUTINTERVALCOUNT (0x18, len-1, `rounds`) before
     /// CONFIGURE_WORKOUT so the PM5 caps the piece at `rounds` intervals.
     ///
-    /// The count command byte + its 1-byte value are TRACE-DERIVED: the app's own
-    /// captured CSAFE trace (live-erg 2026-07-11 Bout 8, the accepted-but-never-arming
-    /// public 0x1A frame) carried `18 01 03` for a 3-round program. The *exact*
-    /// multi-round proprietary encoding (count command, whether a per-interval split is
-    /// also required, rest units at >255s) is UNPROVEN on hardware — this is the
-    /// live-erg re-validation gate. Deliberately NO SET_SPLITDURATION (0x05): neither
-    /// the spec golden vector nor the captured device frame carries a split for a
-    /// distance interval, so adding one would be a second unproven guess. The dialect
-    /// switch itself (→ proprietary 0x76 + the terminating SET_SCREENSTATE that the dead
-    /// public path omitted) is the HIGH-confidence half of the fix.
+    /// ⚠️ DEAD ON HARDWARE — NO PRODUCTION CALLERS (SC-o1ur, device-proven 2026-08-04).
+    /// The count command byte + its 1-byte value were TRACE-DERIVED, never proven: the
+    /// app's captured CSAFE trace (live-erg 2026-07-11 Bout 8) carried `18 01 03` for a
+    /// 3-round program. The 2026-08-04 tethered run settled it — real firmware ACCEPTS
+    /// this frame (the 0x0031 workout DEFINITION flips to type 0x07 FixedDistInterval at
+    /// the programmed distance) but never ARMS it: the odometer is NOT zeroed and the
+    /// workout state stays `workoutRow` on the previous piece's distance, so no fresh
+    /// sub-50m packet is ever emitted and the consumer's fresh-piece gate can never
+    /// release. That is the same accepted-but-never-arming signature as the dead public
+    /// 0x1A path — a PARTIAL program (definition written, counters not zeroed).
+    /// Native distance intervals now arm ONE WORK INTERVAL AT A TIME via the
+    /// hardware-proven `proprietaryFixedDistanceFrame` single-split, with the app owning
+    /// the rest windows (which it already did — the PM5's interval structure was only
+    /// ever on-erg decoration). Kept here as the documented negative result; do NOT
+    /// reintroduce it without a fresh on-erg capture showing distance actually drop
+    /// below 50m after the frame lands.
     public static func proprietaryDistanceIntervalFrame(meters: Int, restSeconds: Int, rounds: Int) -> [UInt8] {
         let rest = UInt16(clamping: restSeconds)
         var sub: [UInt8] = []
@@ -348,7 +354,16 @@ public enum PM5CommandBuilder {
 
     /// Terminate the current/finished workout — the documented programmatic path from
     /// WORKOUTLOGGED back to WaitToBegin before re-programming (spec p.88 + Appendix E p.161).
-    /// Golden vector: F1 76 04 13 02 01 02 62 F2
+    /// Golden vector: F1 76 04 13 02 01 02 60 F2
+    /// (SC-a4id: the checksum byte was documented as 0x62 — wrong. The XOR over the six
+    /// content bytes 76 04 13 02 01 02 is 0x60, and 0x60 is the byte real firmware both
+    /// receives and echoes in its ACK. The builder was always correct; only this comment
+    /// was off, and it ships in the public VirtualPM5 package.)
+    ///
+    /// NOTE the documented transition is WORKOUTLOGGED/WORKOUTEND → WaitToBegin. This is a
+    /// SCREEN command; sending it against a LIVE `workoutRow` piece is ACKed at the CSAFE
+    /// control layer while the rowing engine ignores it entirely (SC-o1ur, device 2026-08-04)
+    /// — end the piece first (GoFinished → GoIdle) if the erg may still be rowing.
     public static func terminateWorkoutFrame() -> [UInt8] {
         proprietaryFrame(subCommands: [0x13, 0x02, 0x01, 0x02]) // SCREENVALUEWORKOUT_TERMINATEWORKOUT
     }

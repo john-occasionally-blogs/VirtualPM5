@@ -84,6 +84,95 @@
 //                               — SC-eqzh reconnect half / SC-dxsm analog.
 //  -VirtualPM5InitialState 'inProgress:<t>m@<c>m'  (SC-7nqt.2.4) boot ALREADY mid-piece
 //                               (rowing <c>/<t> m the app never armed) — cold adoption.
+//  -VirtualPM5StuckWorkoutRow   (SC-o1ur) the first N program frames (default 1, override
+//                               -VirtualPM5StuckWorkoutRowIgnore <n>) are ACKed but NOT armed —
+//                               counters untouched, no fresh <50m frame ever lands, so the
+//                               consumer's fresh-piece gate reaches its timeout and must run its
+//                               recovery. Reproduces the 2026-08-04 real-firmware wedge and
+//                               defeats this emulator's instant-reset blindspot. While on,
+//                               GoFinished from a LIVE piece is also accepted (spec-legal,
+//                               UNPROVEN on hardware).
+//  -VirtualPM5DirtyOdometer <m> (SC-o1ur attempt 6) boot as a LINGERING UN-TERMINATED Just Row:
+//                               phase workoutRow, workoutType 0x01, odometer already at <m>,
+//                               athlete stepped off (distance FROZEN, piece clock ticking — the
+//                               b888 pre-arm signature). The erg is dirty for a reason the app
+//                               CANNOT know from its own bookkeeping, so a proxy-flag un-park
+//                               will not fire. While lingering: typed programs are ACKed and
+//                               INSTALLED (0x0031 type flips) but the odometer is NOT zeroed and
+//                               the phase stays workoutRow (b888 L1847 — no fresh sub-50m frame
+//                               ever lands); TERMINATE is ACKed and IGNORED (2026-08-04 tether
+//                               truth — a bare-TERMINATE fix cannot pass this knob); GoFinished
+//                               ENDS the linger (hardware-UNPROVEN, the standing 0x86-from-
+//                               workoutRow device-day question), after which the erg behaves
+//                               normally. Distinct from -VirtualPM5InitialOdometer (idle stale
+//                               counters, programs land normally) and -VirtualPM5LingerJustRow
+//                               (the APP programs the Just Row itself → exercises only the
+//                               proxy-flag path b888 proved insufficient).
+//  -VirtualPM5DirtyOdometerRejectGoFinished  (SC-o1ur review) rides ON TOP of
+//                               -VirtualPM5DirtyOdometer: while the linger holds workoutRow,
+//                               GoFinished is REJECTED (proper CSAFE reject status, linger
+//                               unchanged) — the PESSIMISTIC branch of the standing
+//                               0x86-from-workoutRow device-day unknown (all 17 captured
+//                               accepted 0x86s were inUse-parked). Under it the un-park walk
+//                               must degrade LOUDLY (ceiling send → gate refusal → the
+//                               ARM-ODOMETER DIRTY oracle), never let a retry chain land a
+//                               program mid-teardown. No effect without -VirtualPM5DirtyOdometer.
+//  -VirtualPM5IgnoreTerminateAtWorkoutRow  (SC-lnp1 review) the PESSIMISTIC state-command model
+//                               at ANY live piece (no boot-time linger needed — bites e.g. the
+//                               SC-lnp1 residual Just Row at the interval buzzer): bare TERMINATE
+//                               is ACKed and IGNORED (2026-08-04 tether truth — a bare-TERMINATE
+//                               park cannot pass this knob); GoFinished is REJECTED (F1 19 19,
+//                               DEVICE-CONFIRMED 2026-08-14); GoIdle IS honored (DEVICE-CONFIRMED
+//                               2026-08-14) — it ends-and-parks the piece frozen (0x0C, no
+//                               0x0039), after which TERMINATE zeroes via the captured
+//                               terminate-from-logged walk and the erg settles to waitToBegin.
+//                               The proven escape is exactly the GoIdle → TERMINATE cadence.
+//  -VirtualPM5OfflineACKWhileRowing  (SC-0wi8) a program frame landing on a LIVE piece is ACKed
+//                               .ok with slaveState=OFFLINE (not the captured F1 99 reject) and
+//                               the definition is binned; the erg then WEDGES — distance frozen,
+//                               piece clock still ticking, FTMS pace forced out of the consumer's
+//                               60..600 window, and GoFinished/GoIdle/TERMINATE reduced to
+//                               ACKed no-ops. Reaches the offline-ACK branch (SC-oi60) that the
+//                               mid-piece reject makes unreachable in sim, and reproduces the
+//                               live pace/500m FREEZE on the source device. NOT a disconnect.
+//  -VirtualPM5RowDuringRest     (SC-2rqd) the athlete KEEPS STROKING through rest windows instead
+//                               of stepping off between pieces: after a brief glide-down
+//                               (-VirtualPM5RowDuringRestQuiet <s>, default 3), the 0x0032
+//                               stroke-rate byte goes nonzero while the erg is parked/idle/armed
+//                               (the un-armed flywheel signal SC-eye8's early-rowing detector
+//                               keys on — structurally unreachable in sim before this knob), and
+//                               a program landing mid-stroke flywheel-starts IMMEDIATELY (no
+//                               startDelay wind-up) so the armed piece banks real 0x0031 meters
+//                               during the remaining rest — the SC-qq4w banking shape and the
+//                               A-side of SC-lnp1's counting gate. The parked 0x0031 counters
+//                               stay FROZEN (captured logged-park truth; on real hardware a
+//                               parked results screen does not accrue meters), and the parked
+//                               workoutState stays 0x0C — whether real firmware instead spawns a
+//                               Just Row when you pull on a parked erg is hardware-UNPROVEN (ERG
+//                               DAY item); this models the OPTIMISTIC branch where the arm still
+//                               lands cleanly. Quiet=0 models a literally-never-stops athlete
+//                               (defeats the detector's quiet-tick gate BY DESIGN — proves the
+//                               gate); quiet under ~2s risks the app's 1Hz rest sampler missing
+//                               the quiet window entirely.
+//  -VirtualPM5SpindownResidual <m>  (SC-qv39) the ERG DAY 2026-08-14 spindown-residual truth
+//                               (2-up RFT RowCal, build 994: re-arm during flywheel spindown →
+//                               ARM-ODOMETER DIRTY d=19.8, piece armed ONTO the residual). After
+//                               the FIRST piece ends, the still-spinning flywheel keeps <m>
+//                               meters of residual motion: teardown zeros RE-ACCRUE to <m>
+//                               (wire-continuous idle counter), and the NEXT resetting-native
+//                               install (distance/cal/interval) is accepted with the counter
+//                               PRE-LOADED at <m> — NO counter reset ever follows (distinct from
+//                               -VirtualPM5DirtyOdometer, whose boot-linger routes all self-heal:
+//                               GoFinished ends the linger → armed zeros, or the reset-watch
+//                               corrects). The 0x0031 stream climbs FROM the residual and the
+//                               erg's own WORKOUTEND fires at counter=target, so the piece
+//                               "completes" having done target−<m> real work. ONE-SHOT: consumed
+//                               at that arm; every later arm is CLEAN (the device night's next
+//                               arm was CLEAN). Frames are capture-shaped throughout — the app
+//                               can detect it ONLY via the SC-o1ur ARM-ODOMETER audit. Keep
+//                               <m> under the 50m fresh-frame ceiling for the gate-release shape
+//                               (device truth 19.8); ≥50 exercises the gate-timeout branch
+//                               instead. 0 = OFF, bit-identical.
 //
 //  Observability: every state transition, command, and piece-official emits a
 //  "🧪 VPM5" stdout line (grep the token VPM5 in the runtime log).
@@ -100,6 +189,8 @@ public final class VirtualPM5 {
     public static let csafeRxUUID = CBUUID(string: "CE060022-43E5-11E4-916C-0800200C9A66")
     public static let endSummaryUUID = CBUUID(string: "CE060039-43E5-11E4-916C-0800200C9A66")
     public static let ftmsRowerDataUUID = CBUUID(string: "2AD1")
+    /// SC-us0r: per-stroke data (0x0035). The app's ONLY stroke-count source.
+    public static let strokeDataUUID = CBUUID(string: "CE060035-43E5-11E4-916C-0800200C9A66")
     public static let additionalStatus2UUID = CBUUID(string: "CE060033-43E5-11E4-916C-0800200C9A66")     // SC-fadm 0x0033
     public static let additionalEndSummaryUUID = CBUUID(string: "CE06003A-43E5-11E4-916C-0800200C9A66")  // SC-fadm 0x003A
 
@@ -118,6 +209,19 @@ public final class VirtualPM5 {
     public struct Config {
         /// Base pace, seconds per 500m (app plausibility window: 61-599).
         var paceSecondsPer500: Double = 120
+        /// SC-mib2 finishing kick: from `finishKickAfterSeconds` into a piece, the athlete
+        /// rows at `finishKickPace` instead of the base pace. Without it the emulator rows one
+        /// constant pace ±2s jitter, so the LAST instantaneous sample and the piece MEAN are the
+        /// same number — and a fixture built on it cannot tell "persisted the average" from
+        /// "persisted the final stroke" (feedback_mocks_must_discriminate). Real athletes sprint
+        /// the last 30s; a real 5-min device capture finished 4.7 s/500m faster than its mean,
+        /// which is exactly what made the defect visible on hardware and invisible on the sim.
+        /// 0 = OFF, bit-identical to today. Known gap this knob exposes: the emulator's 0x0039
+        /// averagePace is the tick-mean of instantaneous paces rather than total-time ÷
+        /// total-distance as a real PM5 reports — identical under constant pace, ~6% apart under
+        /// a kick (SC-flvf).
+        var finishKickPace: Double = 0
+        var finishKickAfterSeconds: Double = 20
         /// Stroke rate, strokes per minute (app window: 1-59, |Δ|≤10 between frames).
         var strokeRate: Int = 24
         /// HR ramp (strap-on-PM5 model): start → peak at ~0.55 bpm/s.
@@ -162,6 +266,156 @@ public final class VirtualPM5 {
         /// (which then emits the interval 0x0039 + 0x003A and walks to re-arm). OFF =
         /// today's count-honoring self-terminate (bit-identical when the flag is absent).
         var intervalUnbounded: Bool = false
+        /// SC-o1ur: `-VirtualPM5StuckWorkoutRow` — reproduce the ACCEPTED-BUT-NEVER-ARMING
+        /// program, the real-firmware failure captured on a tethered PM5 2026-08-04. While a
+        /// piece is LIVE the erg ACKs the program frame at the CSAFE layer (the app sees `ok`,
+        /// no reject, no retry) yet the workout engine ignores it entirely: counters are NOT
+        /// zeroed and the phase stays rowing, so no fresh sub-50m status frame is ever emitted
+        /// and the consumer's fresh-piece gate can never release.
+        ///
+        /// This exists to attack the emulator's own documented blindspot — VirtualPM5 resets
+        /// its odometer instantly on ANY program frame, which is precisely why four rounds of
+        /// prior SC-o1ur/SC-ir36/SC-nc2x fixes went green in sim and failed on hardware. With
+        /// this flag the gate can actually reach its timeout in sim, making the RECOVERY
+        /// sequence (frame order, settle timing, bounded retry, final reprogram) observable.
+        ///
+        /// Deterministic by COUNT rather than by phase: the first `stuckWorkoutRowIgnoreCount`
+        /// program frames are ACKed and ignored, then programming behaves normally. Keying on
+        /// the erg phase instead proved useless — the app's routine segment teardown sends
+        /// GoFinished before the next program, so the erg was never in a live phase when the
+        /// program landed and the trap never sprang. A count forces exactly one gate timeout
+        /// (and therefore exactly one recovery walk) whatever the surrounding choreography.
+        ///
+        /// While the flag is on, GoFinished (0x86) from a LIVE piece is also accepted, modelling
+        /// the spec-legal escape the recovery walk depends on. Whether real firmware honours
+        /// GoFinished from a live `workoutRow` is UNPROVEN — device-day question.
+        /// 0 = OFF, bit-identical to today.
+        var stuckWorkoutRowIgnoreCount: Int = 0
+        var stuckWorkoutRow: Bool { stuckWorkoutRowIgnoreCount > 0 }
+        /// SC-o1ur (attempt 6): `-VirtualPM5DirtyOdometer <m>` — boot the erg as a LINGERING,
+        /// UN-TERMINATED Just Row: phase `workoutRow`, workoutType Just Row (0x01), cumulative
+        /// odometer already at <m> meters, athlete stepped off — distance FROZEN while the piece
+        /// clock keeps ticking (the b888 pre-arm signature: distance bytes constant across
+        /// frames, elapsed incrementing). Faithful to build_results/ergday-2026-08-10/
+        /// tether-b888.log L1737-L2204: the erg is dirty for a reason the app cannot recover
+        /// from its own bookkeeping (athlete rowed the erg standalone / app relaunch wiped the
+        /// in-memory proxy flag), so an un-park gated on `lastSentProgramWasLingeringJustRow`
+        /// never fires — exactly how five sim-green fixes died on hardware. Behavior while the
+        /// linger is active:
+        ///   • a typed program frame is ACKed and INSTALLED (0x0031 workoutType flips) but the
+        ///     odometer is NOT zeroed and the phase stays workoutRow (b888 L1847) — no fresh
+        ///     sub-50m frame is ever emitted, so an un-un-parked consumer's fresh-piece gate
+        ///     MUST time out;
+        ///   • TERMINATE is ACKed at the control layer and IGNORED by the rowing engine
+        ///     (2026-08-04 tether truth: TERMINATE at workoutRow left the next 0x0031
+        ///     byte-identical but for elapsed) — a fix that fires only a bare TERMINATE
+        ///     therefore CANNOT go green against this knob;
+        ///   • GoFinished ENDS the linger (hardware-UNPROVEN — the same 0x86-from-workoutRow
+        ///     open question flagged on recoverStuckFreshPieceGate; device-day item), after
+        ///     which GoIdle / TERMINATE / programs behave normally.
+        /// 0 = off, bit-identical to today. Distinct from `initialOdometerMeters` (erg IDLE on
+        /// stale counters; a program's armed zeros land normally) and from the app-side
+        /// -VirtualPM5LingerJustRow harness (the APP programs the Just Row itself, which only
+        /// exercises the proxy-flag path b888 proved insufficient).
+        var dirtyOdometerMeters: Int = 0
+        var dirtyOdometer: Bool { dirtyOdometerMeters > 0 }
+        /// SC-o1ur review: `-VirtualPM5DirtyOdometerRejectGoFinished` — the PESSIMISTIC branch
+        /// of the 0x86-from-workoutRow unknown: while the linger is active, GoFinished is
+        /// REJECTED (proper CSAFE reject status; linger unchanged) instead of ending the piece.
+        /// Every captured ACCEPTED 0x86 was sent from an inUse-PARKED state (17/17), so real
+        /// firmware may well refuse it from a live workoutRow; this knob proves the consumer
+        /// fails LOUDLY under that model (no retry chain racing the walk, DIRTY oracle fires)
+        /// rather than corrupting. Riding flag — no effect unless `dirtyOdometer` is on.
+        var dirtyOdometerRejectGoFinished = false
+        /// SC-lnp1 review: `-VirtualPM5IgnoreTerminateAtWorkoutRow` — the PESSIMISTIC model of
+        /// state commands at a LIVE piece, RejectGoFinished-style but needing no boot-time
+        /// linger: it bites ANY piece the athlete is actively rowing (e.g. SC-lnp1's residual
+        /// Just Row still live at the interval buzzer). Three rules, each an ERG DAY truth:
+        ///   • a bare TERMINATE is ACKed at the control layer and IGNORED by the rowing engine
+        ///     (2026-08-04 tether truth: next 0x0031 byte-identical but for elapsed;
+        ///     wedge-implicated) — a completion-time park that fires only a bare TERMINATE
+        ///     CANNOT go green against this knob;
+        ///   • GoFinished (0x86) is REJECTED (proper CSAFE reject; toggle repeats per the
+        ///     flip-on-accept rule) — DEVICE-CONFIRMED 2026-08-14 (F1 19 19, SC-o1ur attempt
+        ///     six), no longer the open question the DirtyOdometer knobs modeled;
+        ///   • GoIdle IS honored — DEVICE-CONFIRMED 2026-08-14: GoIdle → TERMINATE from
+        ///     workoutRow settles the erg to waitToBegin and the next program arms CLEAN
+        ///     d=0.0. Modeled as GoIdle ending-and-parking the live piece (frozen carryover,
+        ///     state 0x0C, NO 0x0039 — the piece never completed), after which TERMINATE takes
+        ///     the captured terminate-from-logged walk (stale window → cleared idle zeros).
+        ///     GoIdle alone is deliberately NOT modeled as zeroing — the proven cadence is the
+        ///     pair.
+        /// OFF = bit-identical to today (the default keeps the optimistic mid-row-TERMINATE
+        /// model that avoids stranding `.rowing`; see handleTerminate's UNCAPTURED-corner note).
+        var ignoreTerminateAtWorkoutRow = false
+        /// SC-0wi8: `-VirtualPM5OfflineACKWhileRowing` — the erg ACKs a program frame that lands
+        /// on a LIVE piece with prevFrameStatus `.ok` and slaveState `.offline`, then WEDGES.
+        ///
+        /// This attacks a second emulator blindspot, distinct from `stuckWorkoutRow`. Today a
+        /// program arriving mid-piece is REJECTED here (`pieceActiveRejectsPrograms`, captured
+        /// F1 99), so the emulator can never reach `handleProgramDefinitionACK` — the consumer's
+        /// entire offline-ACK branch (SC-oi60, shipped v2.62.18) is unreachable in sim and
+        /// shipped unexercised. Real firmware ACKs `.offline` on a rowing erg (the 888 log corpus:
+        /// 8/9 offline ACKs arrived with MOVING Just Row data), which is what makes SC-oi60's
+        /// recovery walk fire against a live piece.
+        ///
+        /// WEDGE MODEL (hardware-behavioral, corroborated by the in-repo truths but UNPROVEN as a
+        /// causal chain — the SC-o1ur capture proves TERMINATE is a no-op on an ALREADY-wedged
+        /// erg, not that this walk wedges a healthy one; hardware re-confirm rides ERG DAY 2):
+        ///   • the definition is BINNED — no arm, no counter reset;
+        ///   • TERMINATE / GoFinished / GoIdle become no-ops, so the recovery walk cannot escape;
+        ///   • 0x0031 keeps streaming with distance FROZEN and the piece clock still ticking;
+        ///   • FTMS instantaneous pace drops OUT of the consumer's 60..600 plausibility window.
+        /// Deliberately NOT a disconnect: the app must keep believing the erg is connected, or the
+        /// surfaces blank instead of holding a stale value and the repro proves the wrong thing.
+        /// OFF = bit-identical to today.
+        var offlineACKWhileRowing: Bool = false
+        /// SC-2rqd: `-VirtualPM5RowDuringRest` — the athlete keeps stroking through rest
+        /// windows instead of stepping off between pieces. After each piece ends (and after a
+        /// glide-down of `rowDuringRestQuietSeconds`), the 0x0032 stroke-rate byte reads the
+        /// configured SPM while the erg has NO running piece (parked/idle/armed — the un-armed
+        /// flywheel signal SC-eye8's early-rowing detector keys on, unreachable in sim before
+        /// this knob because the default athlete only rows once armed), and a program landing
+        /// mid-stroke flywheel-starts immediately with no startDelay wind-up — so the armed
+        /// piece banks real 0x0031 meters during the remaining rest (the SC-qq4w banking shape;
+        /// SC-lnp1's counting-gate A-side). Parked 0x0031 counters stay FROZEN (captured
+        /// logged-park truth) and the parked state stays 0x0C: whether a real PM5 instead spawns
+        /// a Just Row when pulled on a parked results screen is hardware-UNPROVEN (ERG DAY) —
+        /// this is the OPTIMISTIC model where the arm still lands cleanly. false = off,
+        /// bit-identical to today.
+        var rowDuringRest: Bool = false
+        /// SC-2rqd: seconds of glide-down quiet between a piece ending and the athlete resuming
+        /// strokes (`-VirtualPM5RowDuringRestQuiet <s>`). Default 3 — long enough that the
+        /// app's 1Hz rest sampler reliably observes a strokeRate==0 tick (the SC-eye8 detector's
+        /// quiet-gate precondition). 0 = the athlete literally never stops: the detector's
+        /// quiet-tick gate then correctly refuses to fire, which is itself a provable property.
+        /// Meaningless without `rowDuringRest`.
+        var rowDuringRestQuietSeconds: Double = 3.0
+        /// SC-qv39: `-VirtualPM5SpindownResidual <m>` — the ERG DAY 2026-08-14 device truth
+        /// (tether build_results/ergday-20260814/iphone-tether.log, RFT window after L20488):
+        /// a round re-arm fired while the flywheel was still spinning down and the erg ACCEPTED
+        /// the program ONTO the residual odometer (ARM-ODOMETER DIRTY d=19.8) — the counter then
+        /// RAN FROM the residual, so the piece "completed" at counter=target having done
+        /// target−residual real work (~1-2 phantom cal that round pre-fix). Model, one-shot:
+        ///   • at the FIRST piece end, the residual arms (`spindownResidualPending`);
+        ///   • a teardown TERMINATE's clearToIdle zeros then RE-ACCRUE to <m> (the still-
+        ///     spinning flywheel writes meters onto the zeroed counter — how the device's
+        ///     counter read 19.8 at install), keeping the idle/stale wire continuous;
+        ///   • the next RESETTING-NATIVE arm (distance/calorie/interval — exactly the scope of
+        ///     the app's SC-qv39 re-baseline; TIME retains counters by its own rule and Just Row
+        ///     is never gate-audited) consumes the one-shot: counter PRE-LOADED at <m>, NO
+        ///     reset ever follows, 0x0031 climbs from the residual, WORKOUTEND at
+        ///     counter=target. Every later arm is CLEAN (device night: next arm CLEAN).
+        /// Distinct from `dirtyOdometerMeters` (boot-time linger whose routes all self-heal —
+        /// GoFinished ends the linger → armed zeros land, or the reset-watch corrects; proven
+        /// by the 2026-08-15 run1/run2/run5a sweeps) and from `initialOdometerMeters` (idle
+        /// stale counters, programs land normally). Keep <m> < 50 for the gate-release shape
+        /// (device truth 19.8; ≥50 exercises the fresh-piece-gate timeout instead). The
+        /// distance axis only is modeled — the erg-side residual CAL counter is NOT pre-loaded
+        /// (the app's deferred cal stamp reads the live 0x0033 either way). 0 = OFF,
+        /// bit-identical to today.
+        var spindownResidualMeters: Int = 0
+        var spindownResidual: Bool { spindownResidualMeters > 0 }
         /// SC-7nqt.2.4: `-VirtualPM5InitialState 'inProgress:<target>m@<current>m'` —
         /// the erg boots ALREADY mid-piece (a distance row `current`/`target` m in),
         /// so the app connects to a running piece it never programmed (cold adoption).
@@ -177,6 +431,15 @@ public final class VirtualPM5 {
                 c.paceSecondsPer500 = v
             } else if d.double(forKey: "VirtualPM5Pace") > 60 {
                 c.paceSecondsPer500 = d.double(forKey: "VirtualPM5Pace")
+            }
+            // SC-mib2: windowed into the app's pace plausibility band like -VirtualPM5Pace, so a
+            // typo cannot produce a stream the app silently filters out (which would read as a
+            // broken fixture rather than a bad argument).
+            if d.double(forKey: "VirtualPM5FinishKick") > 60, d.double(forKey: "VirtualPM5FinishKick") < 600 {
+                c.finishKickPace = d.double(forKey: "VirtualPM5FinishKick")
+            }
+            if d.object(forKey: "VirtualPM5FinishKickAfter") != nil {
+                c.finishKickAfterSeconds = min(3600, max(0, d.double(forKey: "VirtualPM5FinishKickAfter")))
             }
             if d.integer(forKey: "VirtualPM5SPM") > 0 { c.strokeRate = min(59, max(10, d.integer(forKey: "VirtualPM5SPM"))) }
             if d.integer(forKey: "VirtualPM5HRStart") > 0 { c.hrStart = d.integer(forKey: "VirtualPM5HRStart") }
@@ -220,6 +483,43 @@ public final class VirtualPM5 {
             // SC-7nqt.12: unbounded zombie-interval scenario (real erg ignores the 0x18 count).
             if ProcessInfo.processInfo.arguments.contains("-VirtualPM5IntervalUnbounded") {
                 c.intervalUnbounded = true
+            }
+            // SC-o1ur: accepted-but-never-arming programs. Default 1 ignored program = exactly
+            // one fresh-piece gate timeout; -VirtualPM5StuckWorkoutRowIgnore <n> overrides.
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5StuckWorkoutRow") {
+                let n = d.integer(forKey: "VirtualPM5StuckWorkoutRowIgnore")
+                c.stuckWorkoutRowIgnoreCount = n > 0 ? min(10, n) : 1
+            }
+            // SC-o1ur attempt 6: lingering un-terminated Just Row on a dirty odometer (b888).
+            if d.integer(forKey: "VirtualPM5DirtyOdometer") > 0 {
+                c.dirtyOdometerMeters = min(1_000_000, max(0, d.integer(forKey: "VirtualPM5DirtyOdometer")))
+            }
+            // SC-o1ur review: pessimistic 0x86 branch — GoFinished rejected while lingering.
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5DirtyOdometerRejectGoFinished") {
+                c.dirtyOdometerRejectGoFinished = true
+            }
+            // SC-lnp1 review: pessimistic live-piece state-command model (TERMINATE ignored,
+            // GoFinished rejected, GoIdle→TERMINATE honored — the ERG DAY 2026-08-14 truths).
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5IgnoreTerminateAtWorkoutRow") {
+                c.ignoreTerminateAtWorkoutRow = true
+            }
+            // SC-0wi8: offline-ACK-while-rowing → wedge (the live-piece pace freeze).
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5OfflineACKWhileRowing") {
+                c.offlineACKWhileRowing = true
+            }
+            // SC-2rqd: athlete keeps stroking through rest windows (never steps off between
+            // pieces). Quiet override windowed 0–60s; 0 = never-stops (see the Config doc).
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5RowDuringRest") {
+                c.rowDuringRest = true
+                if d.object(forKey: "VirtualPM5RowDuringRestQuiet") != nil {
+                    c.rowDuringRestQuietSeconds = min(60, max(0, d.double(forKey: "VirtualPM5RowDuringRestQuiet")))
+                }
+            }
+            // SC-qv39: spindown residual — the ERG DAY 2026-08-14 dirty re-arm (d=19.8): the
+            // next resetting-native install after a piece end is accepted ONTO residual
+            // flywheel meters (counter pre-load, no reset ever; one-shot).
+            if d.integer(forKey: "VirtualPM5SpindownResidual") > 0 {
+                c.spindownResidualMeters = min(1_000_000, max(0, d.integer(forKey: "VirtualPM5SpindownResidual")))
             }
             // SC-7nqt.2.4: cold mid-piece adoption. Format 'inProgress:500m@165m'.
             if let raw = d.string(forKey: "VirtualPM5InitialState"),
@@ -337,6 +637,61 @@ public final class VirtualPM5 {
     private var toggleBit = false
     /// One 0x0B flash frame after a terminate that had nothing parked (captured once).
     private var terminateFlashPending = false
+    /// SC-o1ur (`-VirtualPM5StuckWorkoutRow`): how many programs have been ACKed-and-ignored so
+    /// far. Once it reaches `config.stuckWorkoutRowIgnoreCount`, programming behaves normally.
+    private var stuckProgramsAccepted = 0
+    /// SC-o1ur (`-VirtualPM5DirtyOdometer`): true while the boot-time lingering un-terminated
+    /// Just Row still holds the workoutRow lock. Programs received while set INSTALL WITHOUT
+    /// ZEROING; TERMINATE is ignored; GoFinished clears it (see the Config doc for the
+    /// hardware provenance of each rule).
+    private var dirtyLinger = false
+    /// SC-qv39 (`-VirtualPM5SpindownResidual`): true from the first piece end until the next
+    /// resetting-native arm consumes the residual (see the Config doc for the device
+    /// provenance). While set, a clearToIdle's zeros re-accrue to the residual so the idle/
+    /// stale wire stays continuous with the armed pre-load.
+    private var spindownResidualPending = false
+    /// SC-qv39: one-shot latch — the residual is applied to exactly ONE arm per launch
+    /// (the device night's next arm was CLEAN).
+    private var spindownResidualConsumed = false
+    /// SC-2rqd (`-VirtualPM5RowDuringRest`): ticks since the athlete last drove the flywheel
+    /// inside a running piece. Maintained per-tick (tick()) so the phase walks between pieces
+    /// (ended → logged → terminate → idle → armed) never reset the athlete's stroking
+    /// continuity — the whole point is that the ATHLETE's behavior is independent of the erg's
+    /// program state.
+    private var restStrokeQuietTicks = 0
+    /// SC-2rqd: rest-stroking exists only BETWEEN pieces — set at the first piece end (or the
+    /// first native-interval rest entry), never before, so the pre-workout idle screen stays
+    /// quiet and the FIRST arm keeps its normal startDelay wind-up. Written only under the
+    /// knob (bit-identical structure when off).
+    private var hasEndedAPieceThisSession = false
+    /// SC-2rqd: true while the athlete is actively stroking an erg with NO running piece —
+    /// between pieces, after the glide-down quiet gap. Drives (a) the nonzero 0x0032
+    /// stroke-rate byte while parked/idle/armed (the un-armed flywheel signal SC-eye8's
+    /// early-rowing detector keys on) and (b) the immediate flywheel start when a program lands
+    /// mid-stroke (the SC-qq4w banking shape). Never true while `.rowing` (the piece engine
+    /// owns the athlete there) and never before the session's first piece has ended.
+    private var isRestStroking: Bool {
+        guard config.rowDuringRest, hasEndedAPieceThisSession else { return false }
+        if case .rowing = phase { return false }
+        return Double(restStrokeQuietTicks) * 0.5 >= config.rowDuringRestQuietSeconds
+    }
+    /// SC-0wi8: true once an offline ACK has wedged the erg. Latched for the rest of the
+    /// session — the modelled escape from a wedge is a physical power-cycle, not a command.
+    private var wedged = false
+    private var wedgedAtDistance: Double = 0
+    /// SC-0wi8: an offline ACK has binned a definition on a live piece. Arms (but does not spring)
+    /// the wedge — see wedgeOnWalkIntoLivePiece.
+    private var definitionBinned = false
+    /// Tick at which the definition was binned. The arm is WINDOWED: the consumer's un-park walk
+    /// follows its ACK within seconds (≥0.7s between commands, 1.0s before the reprogram; the
+    /// rival entry point, the fresh-piece gate timeout, fires at 12s). A latch that stayed armed
+    /// indefinitely produced a false wedge minutes later, when a routine SEGMENT_GO_IDLE at a
+    /// leg boundary sprang a trap set by a long-resolved ACK.
+    private var definitionBinnedAtTick = 0
+    /// True while a binned definition can still plausibly be followed by its recovery walk.
+    private var binnedArmWindowOpen: Bool {
+        definitionBinned && (totalTicks - definitionBinnedAtTick) <= 30   // 15s at 0.5s/tick
+    }
 
     // Live piece values
     private var elapsed: Double = 0          // seconds, piece clock
@@ -394,6 +749,12 @@ public final class VirtualPM5 {
 
     // Athlete engine accumulators
     private var currentPace: Double = 120
+    /// SC-mib2: log-noise guard only — announced once per SESSION, not once per piece, so an
+    /// interval workout (where `elapsed` restarts each piece and each piece therefore kicks)
+    /// prints one line rather than one per interval.
+    private var finishKickAnnounced = false
+    /// SC-us0r: odometer at the previous stroke, for 0x0035's per-stroke distance field.
+    private var lastStrokeDistance: Double = 0
     private var avgPaceAccumulator: Double = 0
     private var paceSamples: Int = 0
     private var strokeCount: Int = 0
@@ -429,7 +790,7 @@ public final class VirtualPM5 {
         self.rng = SeededRNG(state: config.seed)
         self.emit = emit
         self.onDisconnectRequest = onDisconnectRequest
-        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script)")
+        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off")")
         if config.initialOdometerMeters > 0 {
             // P2b: leftover values from an earlier bout, visible in the idle 0x0031
             // stream and through the program-accept stale window until armed zeros
@@ -446,6 +807,12 @@ public final class VirtualPM5 {
         }
         if ProcessInfo.processInfo.arguments.contains("-VirtualPM5PreArmRace") {
             print("🧪 VPM5 🔒 9ir8 pre-arm-race lock scenario armed")
+        }
+        if config.rowDuringRest {
+            print("🧪 VPM5 🚣 row-during-rest armed (SC-2rqd): athlete resumes stroking \(String(format: "%.1f", config.rowDuringRestQuietSeconds))s after each piece ends and never stops through rest — SR stays live on 0x0032 while un-armed/parked, a program landing mid-stroke flywheel-starts IMMEDIATELY (no startDelay)")
+        }
+        if config.spindownResidual {
+            print("🧪 VPM5 🌀 spindown-residual armed (SC-qv39): after the FIRST piece end, ~\(config.spindownResidualMeters)m of flywheel residual outlives the teardown; the next resetting-native install is accepted ONTO it (counter pre-load, NO reset ever; one-shot). ERG DAY 2026-08-14 d=19.8 truth")
         }
         if let seed = config.initialInProgress {
             // SC-7nqt.2.4: boot ALREADY rowing a distance piece the app never armed
@@ -464,6 +831,26 @@ public final class VirtualPM5 {
             slaveState = .inUse
             phase = .rowing(.distance(meters: seed.targetMeters))
             print("🧪 VPM5 🎬 initial state: mid-piece adoption — rowing \(seed.currentMeters)/\(seed.targetMeters)m already in progress (elapsed \(String(format: "%.1f", elapsed))s); the app's own program will be refused as piece-active")
+        }
+        if config.dirtyOdometer, config.initialInProgress == nil {
+            // SC-o1ur attempt 6: boot as a LINGERING UN-TERMINATED JUST ROW (b888 pre-arm shape).
+            // The athlete rowed <m> meters and stepped off: distance frozen (scriptStopped
+            // suppresses the athlete engine; the next real arm's resetPieceCounters clears it),
+            // piece clock still ticking, state byte 0x01 workoutRow from the first frame
+            // (rowingTicks past the pre-flip window), slave inUse (a live-but-idle Just Row).
+            workoutTypeByte = 0x01
+            durationBytes = (0, 0x80)
+            distance = Double(config.dirtyOdometerMeters)
+            elapsed = distance / 500.0 * config.paceSecondsPer500
+            pieceStartElapsed = 0
+            pieceStartDistance = 0
+            rowingTicks = 3
+            dragFactor = 122
+            slaveState = .inUse
+            scriptStopped = true
+            dirtyLinger = true
+            phase = .rowing(.justRow)
+            print("🧪 VPM5 🧳 DIRTY ODOMETER: lingering un-terminated Just Row at \(config.dirtyOdometerMeters)m (workoutRow, athlete stepped off — distance frozen, clock ticking). Typed programs will INSTALL WITHOUT ZEROING, TERMINATE will be IGNORED, GoFinished ends the linger (SC-o1ur b888 model)")
         }
     }
 
@@ -515,12 +902,84 @@ public final class VirtualPM5 {
     private func route(_ contents: [UInt8]) {
         guard let first = contents.first else { return }
 
+        // SC-0wi8: a wedged erg still TALKS — it ACKs the control layer so the app has no
+        // transport-level signal anything is wrong — but the state-changing escapes GoFinished
+        // (0x86) and GoIdle (0x82) no longer move it. This is what turns SC-oi60's recovery walk
+        // (GoFinished → GoIdle → TERMINATE → reprogram) into a sequence of polite no-ops against a
+        // live piece. TERMINATE (routed separately) is handled in handleTerminate().
+        // SC-0wi8: GoIdle (0x82) into a live piece whose definition was just binned is THE
+        // destructive step — hardware truth #3, the User ID screen yank, with the reprogram then
+        // installing-then-erasing. GoFinished (0x86) is deliberately NOT a wedge trigger: the app
+        // sends a routine SEGMENT_GO_FINISHED at every segment teardown, and 0x86 from a live
+        // workoutRow is flagged HARDWARE-UNPROVEN in this repo (see recoverStuckFreshPieceGate).
+        // Modelling it as destructive produced exactly that false positive — a wedge fired by
+        // normal choreography AFTER the fix had already saved the piece.
+        if config.offlineACKWhileRowing, first == 0x86 || first == 0x82 {
+            let live: Bool = { if case .rowing = phase { return true }; return false }()
+            let springs = (first == 0x82) && binnedArmWindowOpen && live
+            if wedged || springs {
+                if springs { wedgeOnWalkIntoLivePiece("GoIdle") }
+                respond(reject: false, echo: [])
+                print("🧪 VPM5 🧱 0x\(String(format: "%02X", first)) ACKed but IGNORED — erg is WEDGED (SC-0wi8)")
+                return
+            }
+        }
+
         switch first {
         case 0x76:
             routeProprietary(contents)
         case 0x87:
             routePublicCombined(contents)
         case 0x86: // GoFinished — rejected unless inUse (17/17 captured)
+            // SC-o1ur: in the stuck-workoutRow scenario the app sends GoFinished to END a live
+            // piece before terminating it. That is spec-legal but UNCAPTURED on hardware (every
+            // captured 0x86 came from an already-logged state), so it is modelled ONLY under the
+            // harness flag — the device-day question is whether real firmware honours it.
+            // SC-o1ur (`-VirtualPM5DirtyOdometer`): GoFinished ENDS the lingering Just Row —
+            // the modeled escape the state-aware un-park walk depends on (hardware-UNPROVEN,
+            // the same 0x86-from-workoutRow open question as recoverStuckFreshPieceGate;
+            // standing device-day item). Counters CARRY OVER into the idle park — a Just Row
+            // has no 0x0039 to emit — and the next program's armed zeros finally clear them.
+            // SC-o1ur review (`-VirtualPM5DirtyOdometerRejectGoFinished`): the PESSIMISTIC
+            // firmware branch — GoFinished from the lingering workoutRow is REJECTED outright
+            // (proper CSAFE reject status; per the flip-on-accept toggle rule the toggle does
+            // NOT flip) and the linger holds. The consumer's walk must degrade to GoIdle →
+            // TERMINATE (both control-ACKed, engine-ignored here) and fail LOUDLY via the
+            // settled-gate ceiling + fresh-gate refusal + ARM-ODOMETER DIRTY — never via a
+            // retry chain landing a program mid-teardown.
+            if dirtyLinger, config.dirtyOdometerRejectGoFinished {
+                respond(reject: true, echo: [])
+                print("🧪 VPM5 ❌ GoFinished REJECTED — dirty-linger holds workoutRow (-VirtualPM5DirtyOdometerRejectGoFinished pessimistic 0x86 model; linger unchanged)")
+                return
+            }
+            if dirtyLinger, slaveState == .inUse {
+                dirtyLinger = false
+                slaveState = .finished
+                respond(reject: false, echo: [])
+                phase = .idle
+                logTransition("GoFinished accepted — lingering Just Row ENDED (carryover \(String(format: "%.1f", distance))m parked idle; SC-o1ur dirty-linger model, 0x86-from-workoutRow hardware-UNPROVEN)")
+                return
+            }
+            // SC-lnp1 (`-VirtualPM5IgnoreTerminateAtWorkoutRow`): GoFinished from a LIVE piece
+            // is REJECTED — DEVICE-CONFIRMED 2026-08-14 (F1 19 19, SC-o1ur attempt six; every
+            // earlier captured ACCEPTED 0x86 was inUse-parked). Toggle repeats per the
+            // flip-on-accept rule. The consumer's walk must survive this reject (suppressed,
+            // no retry chain) and degrade to GoIdle → TERMINATE.
+            if config.ignoreTerminateAtWorkoutRow, case .rowing = phase {
+                respond(reject: true, echo: [])
+                print("🧪 VPM5 ❌ GoFinished REJECTED — live workoutRow (-VirtualPM5IgnoreTerminateAtWorkoutRow; ERG DAY 2026-08-14 device truth)")
+                return
+            }
+            if config.stuckWorkoutRow, pieceActiveRejectsPrograms {
+                slaveState = .finished
+                respond(reject: false, echo: [])
+                if case .rowing(let piece) = phase {
+                    endPiece(piece, note: "GoFinished on a LIVE piece → ended (UNPROVEN on hardware; -VirtualPM5StuckWorkoutRow model)")
+                } else {
+                    logTransition("GoFinished accepted on a live-but-not-rowing phase (-VirtualPM5StuckWorkoutRow model)")
+                }
+                return
+            }
             if slaveState == .inUse {
                 slaveState = .finished
                 respond(reject: false, echo: [])
@@ -530,6 +989,23 @@ public final class VirtualPM5 {
                 print("🧪 VPM5 ❌ GoFinished rejected (slave \(slaveState))")
             }
         case 0x82: // GoIdle — accept from ready/inUse/finished → idle; reject when already parked
+            // SC-lnp1 (`-VirtualPM5IgnoreTerminateAtWorkoutRow`): GoIdle at a LIVE piece IS
+            // honored — DEVICE-CONFIRMED 2026-08-14: GoIdle → TERMINATE from workoutRow
+            // settles the erg to waitToBegin and the next program arms CLEAN d=0.0. Model:
+            // GoIdle ends-and-parks the live piece FROZEN (carryover values, state 0x0C, NO
+            // 0x0039 — the piece never completed); the follow-up TERMINATE then arrives at the
+            // parked `.logged` phase and zeroes via the captured terminate-from-logged walk.
+            // GoIdle alone deliberately does NOT zero — the proven cadence is the pair.
+            if config.ignoreTerminateAtWorkoutRow, case .rowing(let piece) = phase {
+                frozenElapsed = elapsed
+                frozenDistance = distance
+                slaveState = .idle
+                if config.rowDuringRest { hasEndedAPieceThisSession = true }  // SC-2rqd parity with endPiece
+                phase = .logged(piece)
+                respond(reject: false, echo: [])
+                logTransition("GoIdle HONORED on live piece → parked frozen (carryover \(String(format: "%.1f", distance))m, 0x0C, no 0x0039; -VirtualPM5IgnoreTerminateAtWorkoutRow, ERG DAY 2026-08-14 device truth)")
+                return
+            }
             switch slaveState {
             case .ready, .inUse, .finished:
                 slaveState = .idle
@@ -589,6 +1065,30 @@ public final class VirtualPM5 {
             i += 2 + len
         }
 
+        // SC-o1ur: the accepted-but-never-arming failure. Checked BEFORE the reject gate —
+        // on the real device the frame was NOT rejected, which is exactly what made it lethal
+        // (no reject means the app's retry safety net never fires either).
+        if workoutType != nil, stuckProgramsAccepted < config.stuckWorkoutRowIgnoreCount {
+            respond(reject: false, echo: [0x76, UInt8(ids.count)] + ids)
+            stuckProgramsAccepted += 1
+            print("🧪 VPM5 🪤 STUCK-WORKOUTROW: program #\(stuckProgramsAccepted)/\(config.stuckWorkoutRowIgnoreCount) ACCEPTED but NOT armed — counters untouched, phase unchanged, no fresh <50m frame will be emitted (SC-o1ur real-firmware signature). The consumer's fresh-piece gate must now time out and recover.")
+            return
+        }
+
+        // SC-o1ur (`-VirtualPM5DirtyOdometer`): a typed program landing on the lingering
+        // un-terminated Just Row is ACKed and INSTALLED — the 0x0031 workoutType flips to the
+        // programmed type — but the odometer is NOT zeroed and the phase stays workoutRow
+        // (b888 L1847: "type=0x03 state=0x01 dist=80.0m"). No fresh sub-50m frame will ever be
+        // emitted, so the consumer must either have un-parked FIRST (the fix) or its
+        // fresh-piece gate times out onto the dirty meters (the bug).
+        if let t = workoutType, t != 0x01, dirtyLinger {
+            respond(reject: false, echo: [0x76, UInt8(ids.count)] + ids)
+            workoutTypeByte = t
+            if let dt = durationType { durationBytes = (durationValue, dt) }
+            print("🧪 VPM5 🧳 DIRTY-LINGER: program (type 0x\(String(format: "%02X", t)), duration \(durationValue)) INSTALLED onto the un-terminated Just Row — odometer stays \(String(format: "%.1f", distance))m, phase stays workoutRow, NO fresh sub-50m frame will come (SC-o1ur b888 L1847 model)")
+            return
+        }
+
         // Captured firmware truth: programming during an ACTIVE piece → F1 99 reject
         // (all piece types, BOTH dialects — see pieceActiveRejectsPrograms).
         if workoutType != nil, pieceActiveRejectsPrograms {
@@ -632,6 +1132,18 @@ public final class VirtualPM5 {
         // The captured mid-piece F1 99 was itself a PUBLIC re-program (`F1 87 21 …`
         // during the mid-piece reconnect, pm5-older-logs-truths §attach-mid-piece):
         // the reject gate applies to this dialect's program frames identically.
+        // SC-o1ur (`-VirtualPM5DirtyOdometer`): public-dialect ≥500m SETHORIZONTAL onto the
+        // lingering Just Row — same install-without-zeroing model as the proprietary branch.
+        if let first = body.first, first == 0x21, dirtyLinger, body.count >= 5 {
+            let meters = Int(body[2]) | (Int(body[3]) << 8)
+            if meters >= Self.pm5MinProgrammableDistance {
+                respond(reject: false, echo: [])
+                workoutTypeByte = 0x03
+                durationBytes = (meters, 0x80)
+                print("🧪 VPM5 🧳 DIRTY-LINGER: public SETHORIZONTAL \(meters)m INSTALLED onto the un-terminated Just Row — odometer stays \(String(format: "%.1f", distance))m, phase stays workoutRow (SC-o1ur b888 model)")
+                return
+            }
+        }
         if let first = body.first, first == 0x21 || first == 0x1A, pieceActiveRejectsPrograms {
             rejectProgramPieceActive()
             return
@@ -681,11 +1193,106 @@ public final class VirtualPM5 {
     }
 
     private func rejectProgramPieceActive() {
+        // SC-0wi8: under the offline-ACK model this same arrival is ACKed .ok/.offline and
+        // wedges the erg instead of cleanly rejecting. Only while genuinely ROWING — a program
+        // landing in `.ended`/`.resting` keeps the captured F1 99 reject.
+        if config.offlineACKWhileRowing, case .rowing = phase {
+            wedgeOnOfflineACK()
+            return
+        }
         respond(reject: true, echo: [])
         print("🧪 VPM5 ❌ program rejected — piece active (captured F1 99)")
     }
 
+    /// SC-0wi8: ACK the program at the CSAFE layer with slaveState `.offline` (the app reads
+    /// prevFrameStatus `.ok`, so no reject, no retry — it must infer the loss from the state
+    /// alone) and BIN the definition. The erg then wedges: counters stop advancing, the clock
+    /// keeps running, pace leaves the plausibility window, and the escape commands stop working.
+    private func wedgeOnOfflineACK() {
+        let previous = slaveState
+        slaveState = .offline
+        respond(reject: false, echo: [])
+        slaveState = previous
+        // CAUSALITY (matters for testing the FIX, not just the bug): the offline ACK alone does
+        // NOT wedge the erg — it only bins the definition. The wedge is caused by what the
+        // consumer does NEXT, i.e. driving the GoFinished → GoIdle → TERMINATE → reprogram
+        // un-park walk into a still-live piece (GoIdle yanks the athlete to the User ID screen,
+        // the reprogram installs-then-erases). Modelling the wedge on the ACK instead would make
+        // a correct fix look ineffective here: the guard suppresses the WALK, and an ACK-triggered
+        // wedge would fire anyway. So this only arms the trap; walkCommandOnLivePiece() springs it.
+        guard !definitionBinned else {
+            print("🧪 VPM5 ⚠️ another program frame ACKed .offline on a live piece — still binning it")
+            return
+        }
+        definitionBinned = true
+        definitionBinnedAtTick = totalTicks
+        logTransition("program ACKed .ok with slaveState=offline on a LIVE piece → definition BINNED (SC-0wi8). Erg is NOT yet wedged: it wedges only if the consumer now drives its un-park walk into this live piece.")
+    }
+
+    /// SC-0wi8: a recovery-walk command (GoFinished / GoIdle / TERMINATE) arrived while a piece is
+    /// LIVE and its definition has already been binned — this is SC-oi60's un-park walk running
+    /// against an actively-rowing erg. Per the in-repo hardware truths this is what kills the
+    /// piece and leaves the wedge screen streaming.
+    private func wedgeOnWalkIntoLivePiece(_ opcode: String) {
+        guard !wedged else { return }
+        wedged = true
+        wedgedAtDistance = distance
+        logTransition("\(opcode) drove the un-park walk into a LIVE piece → erg WEDGED (SC-0wi8): distance frozen at \(String(format: "%.0f", distance))m, clock still ticking, FTMS pace forced out of range, further escapes are no-ops")
+    }
+
     private func handleTerminate() {
+        // SC-0wi8: TERMINATE on a wedged erg is a PROVEN no-op (the 2026-08-04 tethered capture
+        // on SC-o1ur). Flash only — the phase does not move, so the app's recovery walk cannot
+        // talk its way out of the wedge, which is the whole point of the scenario.
+        if wedged {
+            terminateFlashPending = true
+            print("🧪 VPM5 🧱 TERMINATE ignored — erg is WEDGED (SC-0wi8); flash only, phase unchanged")
+            return
+        }
+        // SC-o1ur (`-VirtualPM5DirtyOdometer`): TERMINATE against the lingering un-terminated
+        // Just Row is ACKed at the control layer and IGNORED by the rowing engine — the
+        // 2026-08-04 tether truth (TERMINATE at workoutRow: next 0x0031 byte-identical but for
+        // elapsed; the erg then dropped to the "press Menu/Back to recover" screen). A fix that
+        // fires only a bare TERMINATE therefore CANNOT pass against this knob. The modeled
+        // escape is GoFinished-first (route()): end the piece, THEN terminate.
+        if dirtyLinger {
+            terminateFlashPending = true
+            print("🧪 VPM5 🧱 TERMINATE ignored — lingering un-terminated Just Row holds the workoutRow lock (SC-o1ur 2026-08-04 model); flash only, phase unchanged")
+            return
+        }
+        // SC-lnp1 (`-VirtualPM5IgnoreTerminateAtWorkoutRow`): a bare TERMINATE fired while the
+        // piece is LIVE is ACKed at the control layer and IGNORED by the rowing engine — the
+        // 2026-08-04 tether truth (next 0x0031 byte-identical but for elapsed;
+        // wedge-implicated), now generalized beyond the DirtyOdometer boot linger to ANY live
+        // piece (e.g. SC-lnp1's residual Just Row at the interval buzzer). A completion-time
+        // park that fires only a bare TERMINATE CANNOT pass against this knob. The modeled
+        // escape is the ERG DAY 2026-08-14 cadence: GoIdle (honored, parks the piece — see
+        // route() 0x82) then TERMINATE, which arrives here at the parked `.logged` phase and
+        // zeroes normally.
+        if config.ignoreTerminateAtWorkoutRow, case .rowing = phase {
+            terminateFlashPending = true
+            print("🧪 VPM5 🧱 TERMINATE ignored — piece is LIVE at workoutRow (-VirtualPM5IgnoreTerminateAtWorkoutRow; 2026-08-04 tether truth); flash only, phase unchanged")
+            return
+        }
+        // SC-0wi8: TERMINATE on an erg that is ACTIVELY ROWING is a no-op on real firmware — a
+        // workoutRow erg never reports waitToBegin and does not stop because the app asked. The
+        // default model above deliberately treats this UNCAPTURED corner as a real termination to
+        // avoid stranding `.rowing` forever; that choice is what makes this bug unreachable in
+        // sim, because the app TERMINATEs before every program and the emulator therefore always
+        // has an idle erg to program. Under this flag we model the hardware truth instead, so the
+        // app's own program can land on a still-live piece — which is the trigger. The resulting
+        // "stall" is not a modelling accident here; it is the scenario.
+        if config.offlineACKWhileRowing, case .rowing = phase {
+            terminateFlashPending = true
+            // TERMINATE alone does NOT wedge, even after a binned definition: the captures show a
+            // live-piece TERMINATE is a flash-only no-op, and the app sends one routinely before
+            // EVERY program. Wedging here would punish normal choreography and — worse — would
+            // make a correct fix look ineffective, since that routine TERMINATE still gets sent.
+            // The wedge belongs to the walk's destructive steps (GoIdle's User-ID yank and the
+            // install-then-erase reprogram), handled in route().
+            print("🧪 VPM5 🧱 TERMINATE ignored — piece is LIVE and the athlete is still pulling (SC-0wi8 model); flash only, phase unchanged")
+            return
+        }
         switch phase {
         case .logged, .ended:
             // Captured: terminate-from-logged zeroes everything after a short stale window.
@@ -784,6 +1391,20 @@ public final class VirtualPM5 {
 
     func tick() {
         totalTicks += 1
+        // SC-2rqd (`-VirtualPM5RowDuringRest`): athlete-continuity clock — runs BEFORE
+        // advancePhase so an arm landing this tick sees the already-stroking athlete and
+        // flywheel-starts immediately. Reset only by an actually-running piece; every parked/
+        // walk phase between pieces counts toward (and then past) the glide-down quiet gap.
+        if config.rowDuringRest {
+            if case .rowing = phase {
+                restStrokeQuietTicks = 0
+            } else {
+                restStrokeQuietTicks += 1
+                if isRestStroking, totalTicks % 10 == 0 {
+                    print("🧪 VPM5 🚣 rest-stroking with NO running piece (SC-2rqd): SR=\(config.strokeRate) live on 0x0032, 0x0031 counters parked at d=\(String(format: "%.1f", distance))m/frozen=\(String(format: "%.1f", frozenDistance))m")
+                }
+            }
+        }
         advancePhase()
         emitGeneralStatus()
         emitAdditionalStatus1()
@@ -889,6 +1510,25 @@ public final class VirtualPM5 {
                         workoutTypeByte = 0x01
                         durationBytes = (0, 0x80)
                     }
+                    // SC-qv39 (`-VirtualPM5SpindownResidual`): the install is accepted ONTO the
+                    // residual flywheel motion — the counter PRE-LOADS at the residual instead of
+                    // the armed zeros, and NO reset ever follows: the 0x0031 stream climbs FROM
+                    // the residual and the erg's own WORKOUTEND fires at counter=target (the
+                    // ERG DAY 2026-08-14 d=19.8 shape). Scope = resetting natives only, exactly
+                    // the app re-baseline's scope (TIME retains counters by its own rule; Just
+                    // Row arms via acceptJustRow and is never gate-audited). One-shot.
+                    if spindownResidualPending {
+                        switch piece {
+                        case .distance, .calories, .interval:
+                            spindownResidualPending = false
+                            spindownResidualConsumed = true
+                            distance = Double(config.spindownResidualMeters)
+                            elapsed = distance / 500.0 * config.paceSecondsPer500
+                            print("🧪 VPM5 🌀 SPINDOWN-RESIDUAL: program (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value)) accepted ONTO the residual — counter PRE-LOADED at \(String(format: "%.1f", distance))m, NO reset will ever follow; 0x0031 climbs from the residual and the erg's own WORKOUTEND fires at counter=target (SC-qv39 ERG DAY 2026-08-14 d=19.8 shape; one-shot consumed, next arm CLEAN)")
+                        case .time, .justRow:
+                            break
+                        }
+                    }
                     armedTicks = 0
                     phase = .armed(piece)
                     logTransition("armed (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value))")
@@ -898,6 +1538,15 @@ public final class VirtualPM5 {
                     durationBytes = (0, 0x80)
                     phase = .idle
                     logTransition("cleared to idle (zeros, type 0x01)")
+                    // SC-qv39 (`-VirtualPM5SpindownResidual`): the still-spinning flywheel
+                    // writes meters onto the just-zeroed counter — how the device's counter
+                    // read 19.8 at install despite the walk's zeros. Keeps the idle/stale wire
+                    // continuous with the armed pre-load; frames stay capture-shaped.
+                    if spindownResidualPending {
+                        distance = Double(config.spindownResidualMeters)
+                        elapsed = distance / 500.0 * config.paceSecondsPer500
+                        print("🧪 VPM5 🌀 SPINDOWN-RESIDUAL: terminate zeros RE-ACCRUED to \(String(format: "%.1f", distance))m by the still-spinning flywheel (idle counter carries the residual; SC-qv39 ERG DAY 2026-08-14)")
+                    }
                 }
             } else {
                 phase = .staleWindow(framesLeft: framesLeft - 1, then: then)
@@ -905,7 +1554,11 @@ public final class VirtualPM5 {
 
         case .armed(let piece):
             armedTicks += 1
-            if Double(armedTicks) * 0.5 >= config.startDelay {
+            // SC-2rqd: an athlete stroking through the rest window is already on the flywheel
+            // when the program lands — no startDelay wind-up. This is what banks 0x0031 meters
+            // into the armed piece during the remaining rest (the SC-qq4w shape).
+            let athleteAlreadyPulling = isRestStroking
+            if Double(armedTicks) * 0.5 >= config.startDelay || athleteAlreadyPulling {
                 rowingTicks = 0
                 dragFactor = 0
                 currentHR = Double(config.hrStart)
@@ -919,7 +1572,11 @@ public final class VirtualPM5 {
                     pieceStartDistance = 0
                 }
                 phase = .rowing(piece)
-                logTransition("flywheel start (athlete pulls)")
+                if athleteAlreadyPulling, Double(armedTicks) * 0.5 < config.startDelay {
+                    logTransition("flywheel start IMMEDIATE — athlete was already stroking through rest (-VirtualPM5RowDuringRest, SC-2rqd); 0x0031 meters now bank during the remaining rest window")
+                } else {
+                    logTransition("flywheel start (athlete pulls)")
+                }
             }
 
         case .rowing(let piece):
@@ -928,9 +1585,28 @@ public final class VirtualPM5 {
             intervalTotalElapsed += 0.5   // SC-7nqt.11: whole-session clock (wire `elapsed` is per-interval)
             intervalWorkElapsed += 0.5    // SC-fadm: WORK-only (NOT incremented in `.resting`)
             applyScript()
+            // SC-0wi8: a WEDGED erg keeps streaming and keeps its piece clock running, but the
+            // rowing engine is gone: distance stops accruing and no valid pace is produced. The
+            // athlete is still pulling — this is the erg's failure, not the athlete stopping,
+            // which is why `elapsed` above is deliberately NOT frozen with it.
+            if wedged {
+                distance = wedgedAtDistance
+                break
+            }
             if !scriptStopped {
                 // Bounded jitter keeps every value inside the app's plausibility filters.
-                currentPace = config.paceSecondsPer500 + Double(Int.random(in: -2...2, using: &rng))
+                // SC-mib2: the finishing kick swaps the base pace for the rest of the piece.
+                let basePace: Double = {
+                    guard config.finishKickPace > 0, elapsed >= config.finishKickAfterSeconds else {
+                        return config.paceSecondsPer500
+                    }
+                    if !finishKickAnnounced {
+                        finishKickAnnounced = true
+                        logTransition("🧪 SC-mib2 finishing kick: \(config.paceSecondsPer500)s → \(config.finishKickPace)s/500m at \(String(format: "%.1f", elapsed))s")
+                    }
+                    return config.finishKickPace
+                }()
+                currentPace = basePace + Double(Int.random(in: -2...2, using: &rng))
                 let distanceDelta = (500.0 / currentPace) * 0.5
                 distance += distanceDelta
                 intervalCumulativeMeters += distanceDelta  // SC-7nqt.11: monotonic totalWorkDistance
@@ -941,6 +1617,7 @@ public final class VirtualPM5 {
                 if strokePhaseTicks >= ticksPerStroke {
                     strokePhaseTicks = 0
                     strokeCount += 1
+                    emitStrokeData()   // SC-us0r: 0x0035 is per-STROKE, not periodic (captured)
                 }
                 if rowingTicks > 2 { dragFactor = 122 + Int(rng.next() % 3) }
                 // HR ramp ~0.55 bpm/s toward peak with ±1 jitter
@@ -999,6 +1676,7 @@ public final class VirtualPM5 {
                         // goes ≤0/negative — tracked, never a terminator); the piece ends ONLY on a
                         // manual TERMINATE, which then emits the interval 0x0039+0x003A (handleTerminate).
                         intervalRestFramesTotal = max(2, Int((Double(intervalRestSeconds) / 0.5).rounded()))
+                        if config.rowDuringRest { hasEndedAPieceThisSession = true }  // SC-2rqd: native-interval rest counts as between-pieces
                         phase = .resting(piece, framesLeft: intervalRestFramesTotal)
                         let leftNote = config.intervalUnbounded && intervalRoundsRemaining <= 0
                             ? "UNBOUNDED +\(1 - intervalRoundsRemaining) past count"
@@ -1030,6 +1708,7 @@ public final class VirtualPM5 {
                 distance = 0
                 strokeCount = 0
                 strokePhaseTicks = 0
+                lastStrokeDistance = 0   // SC-us0r
                 energyKcal = 0
                 phase = .rowing(piece)
                 logTransition("interval rest over → next work round (per-interval elapsed+distance reset)")
@@ -1045,6 +1724,13 @@ public final class VirtualPM5 {
         frozenElapsed = elapsed
         frozenDistance = distance
         slaveState = .manual  // by the time the app's GoFinished arrives, the erg self-logged
+        if config.rowDuringRest { hasEndedAPieceThisSession = true }  // SC-2rqd: rest-stroking exists only BETWEEN pieces
+        // SC-qv39 (`-VirtualPM5SpindownResidual`): the flywheel outlives the piece — arm the
+        // residual for the next resetting-native install (one-shot; see the Config doc).
+        if config.spindownResidual, !spindownResidualConsumed, !spindownResidualPending {
+            spindownResidualPending = true
+            print("🧪 VPM5 🌀 SPINDOWN-RESIDUAL armed (SC-qv39): flywheel keeps ~\(config.spindownResidualMeters)m of residual motion past this piece end — teardown zeros will re-accrue it and the NEXT resetting-native install will be accepted ONTO it (counter pre-load, NO reset follows; one-shot)")
+        }
         phase = .ended(piece, framesLeft: 3 + Int(rng.next() % 2))
         logTransition(note)
     }
@@ -1080,6 +1766,7 @@ public final class VirtualPM5 {
         rowingTicks = 0
         strokeCount = 0
         strokePhaseTicks = 0
+        lastStrokeDistance = 0   // SC-us0r
         energyKcal = 0
         avgPaceAccumulator = 0
         paceSamples = 0
@@ -1191,7 +1878,11 @@ public final class VirtualPM5 {
         var bytes: [UInt8] = []
         bytes += u24LE(Int(v.elapsed * 100))
         bytes += u16LE(Int(speed * 1000))                       // 0.001 m/s
-        bytes.append(UInt8(clamping: isRowingPhase ? config.strokeRate : 0))
+        // SC-2rqd: the stroke-rate byte is INSTANTANEOUS flywheel cadence, so a rest-stroking
+        // athlete shows here even with no running piece (speed/pace stay 0 — piece metrics).
+        // This is the app's own documented assumption ("concept2StrokeRate streams off the
+        // erg's live status regardless of program state") and the SC-eye8 detector's signal.
+        bytes.append(UInt8(clamping: (isRowingPhase || isRestStroking) ? config.strokeRate : 0))
         bytes.append(strapByteFor0032())                        // HR or 0xFF
         bytes += u16LE(Int(currentPace * 100))                  // current pace 0.01 s/500m
         bytes += u16LE(Int(avgPace() * 100))                    // avg pace
@@ -1236,15 +1927,67 @@ public final class VirtualPM5 {
         emit(Self.additionalStatus2UUID, Data(b))
     }
 
+    /// 0x0035 Stroke Data — the characteristic that carries the app's ONLY stroke-count source
+    /// (`Concept2Manager.parseStrokeData`, bytes 18-19). The emulator never emitted it, so
+    /// `concept2StrokeCount` was nil in EVERY sim run and no fixture could see a stroke total —
+    /// which is how SC-us0r's stroke half reached this session unverifiable. Added with SC-us0r.
+    ///
+    /// Layout is the LIVE-CAPTURED field map from the 2026-07-20 erg session
+    /// (`.claude/pm5-emulator/erg-capture-2026-07-20-sc7nqt5.md`, sample
+    /// `52 01 00 61 00 00 67 50 93 00 C6 02 27 04 C4 02 B0 06 02 00`), not the app's expectations:
+    /// elapsed u24×0.01s · distance u24×0.1m · driveLength u8×0.01m · driveTime u8×0.01s ·
+    /// recovery u16×0.01s · strokeDistance u16×0.01m · peak/avg drive force u16×0.1lbs ·
+    /// workPerStroke u16×0.1J · strokeCount u16.
+    ///
+    /// MODELED, not captured (the capture gave one sample, not a physics model): drive length and
+    /// drive time are held at the captured constants; the two forces are derived from work over
+    /// drive length with a 1.5× peak/avg ratio. Only the count, elapsed, distance and per-stroke
+    /// distance are load-bearing today — treat the force fields as shape, not truth, and re-derive
+    /// them from a capture before any assertion depends on them.
+    private func emitStrokeData() {
+        let v = wireValues()
+        let strokePeriod = 60.0 / Double(max(1, config.strokeRate))
+        let strokeDistance = max(0, distance - lastStrokeDistance)
+        // Captured first-stroke edge: work-per-stroke and recovery are 0 on stroke #1 (nothing
+        // prior to integrate) and populate from stroke #2.
+        let isFirstStroke = strokeCount <= 1
+        let driveTime = 0.80                                   // captured constant
+        let driveLength = 1.03                                 // captured constant
+        let recovery = isFirstStroke ? 0 : max(0, strokePeriod - driveTime)
+        let workPerStroke = isFirstStroke ? 0 : wattsNow() * strokePeriod          // J
+        let avgForceNewtons = driveLength > 0 ? workPerStroke / driveLength : 0    // J/m = N
+        let avgForceLbs = avgForceNewtons * 0.224809
+        var b: [UInt8] = []
+        b += u24LE(Int((v.elapsed * 100).rounded()))                       // 0-2   elapsed ×0.01s
+        b += u24LE(Int((v.distance * 10).rounded()))                       // 3-5   distance ×0.1m
+        b.append(UInt8(clamping: Int(driveLength * 100)))                  // 6     drive length
+        b.append(UInt8(clamping: Int(driveTime * 100)))                    // 7     drive time
+        b += u16LE(min(0xFFFF, Int((recovery * 100).rounded())))           // 8-9   recovery
+        b += u16LE(min(0xFFFF, Int((strokeDistance * 100).rounded())))     // 10-11 stroke distance
+        b += u16LE(min(0xFFFF, Int((avgForceLbs * 1.5 * 10).rounded())))   // 12-13 peak force (modeled)
+        b += u16LE(min(0xFFFF, Int((avgForceLbs * 10).rounded())))         // 14-15 avg force (modeled)
+        b += u16LE(min(0xFFFF, Int((workPerStroke * 10).rounded())))       // 16-17 work per stroke
+        b += u16LE(min(0xFFFF, strokeCount))                               // 18-19 STROKE COUNT
+        lastStrokeDistance = distance
+        emit(Self.strokeDataUUID, Data(b))
+    }
+
     private func emitFTMSPair() {
         let v = wireValues()
-        let watts = isRowingPhase && !scriptStopped ? Int(wattsNow()) : 0
+        let watts = isRowingPhase && !scriptStopped && !wedged ? Int(wattsNow()) : 0
+        // SC-0wi8: a wedged erg reports no usable instantaneous pace. 0 is OUTSIDE the consumer's
+        // 60 < paceRaw < 600 plausibility window (Concept2Manager.parseFitnessData), so the app
+        // discards it and — because `currentPace` is only ever ASSIGNED inside that window and is
+        // never cleared mid-piece — the rendered /500m holds its last good value forever. That
+        // stale-hold is the SYMPTOM under test; do not "fix" it by emitting a valid slow pace.
+        let instPace = wedged ? 0 : Int(currentPace)
+        let meanPace = wedged ? 0 : Int(avgPace())
         // Variant A: flags 0x0AFF (19B) — MoreData=1, stroke fields absent.
         var a: [UInt8] = [0xFF, 0x0A]
         a.append(UInt8(clamping: config.strokeRate * 2))        // avg stroke rate ×0.5spm
         a += u24LE(Int(v.distance))                             // total distance, whole m
-        a += u16LE(Int(currentPace))                            // inst pace, whole s
-        a += u16LE(Int(avgPace()))                              // avg pace
+        a += u16LE(instPace)                                    // inst pace, whole s
+        a += u16LE(meanPace)                                    // avg pace
         a += u16LE(watts)                                       // inst power
         a += u16LE(watts)                                       // avg power
         a += u16LE(dragFactor)                                  // resistance = drag
