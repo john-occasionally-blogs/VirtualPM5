@@ -68,6 +68,17 @@
 //  P2 race knobs (SC-7nqt.2, all DEFAULT OFF — bit-identical when absent):
 //  -VirtualPM5SummaryDelay <s>  hold the 0x0039 N seconds past workoutLogged
 //                               (SC-fnka/SC-lv7o/SC-q77u post-save races)
+//  -VirtualPM5SummaryNeverArrives  (SC-7xs4/SC-k4vu) the piece is LOGGED on the erg but
+//                               NEITHER its 0x0039 NOR its paired 0x003A is ever delivered.
+//                               The delay knob can only make a summary LATE; this is the
+//                               branch where it never comes, so a consumer that marks its
+//                               hero "provisional until the official number lands" can be
+//                               SEEN keeping that marking forever. Composes with the delay
+//                               (held, then dropped at the end of the hold).
+//  -VirtualPM5AdditionalSummaryNeverArrives  (SC-7xs4) narrower: the 0x0039 lands, ONLY the
+//                               paired 0x003A is lost — an official record that looks
+//                               complete while exactly splitCount/averageWatts/calories/
+//                               totalRestTime are missing, the field shape SC-7xs4 recorded.
 //  -VirtualPM5InitialOdometer <m>  boot with leftover meters; stale until a
 //                               program's zeros land (SC-9i07/SC-wmoo.1/SC-bca1)
 //  -VirtualPM5CooldownPiece <m> athlete keys a manual piece after the app piece
@@ -274,6 +285,28 @@ public final class VirtualPM5 {
         /// SC-q77u races). 0 = off — P1 timing (summary one frame before the
         /// logged park) is bit-identical.
         var summaryDelaySeconds: Double = 0
+        /// SC-7xs4 / SC-k4vu: `-VirtualPM5SummaryNeverArrives` — the end-of-workout
+        /// summary is LOGGED by the erg but NEVER delivered on the wire. The 0x0039
+        /// AND its paired 0x003A are both dropped: they share one logEntryDate/time
+        /// and a consumer pairs them, so a lone 0x003A is a shape this path cannot
+        /// produce, and stashing one forever would model a DIFFERENT defect than the
+        /// missing official record. Distinct from `summaryDelaySeconds`, which only
+        /// ever makes the summary LATE — a held summary is always delivered in the
+        /// end, so "never arrives" was unreachable before this knob. The two COMPOSE:
+        /// with both on, the summary is held for the delay and then dropped at the
+        /// end of the hold, which is the honest model of a loss that happens at
+        /// delivery time rather than at log time. false = off (bit-identical).
+        var summaryNeverArrives: Bool = false
+        /// SC-7xs4 / SC-k4vu: `-VirtualPM5AdditionalSummaryNeverArrives` — the
+        /// NARROWER sibling. The 0x0039 lands normally and only the paired 0x003A is
+        /// lost, so the consumer ends up with an official record that LOOKS complete
+        /// while exactly the 0x003A-contributed fields (split count, average watts,
+        /// erg-truth calories, total rest time) are missing. That is the field shape
+        /// SC-7xs4 recorded from three back-to-back pieces, and it is a strictly
+        /// different observable from losing the whole record — hence its own switch
+        /// rather than a second meaning bolted onto the first. Implied by
+        /// `summaryNeverArrives` (which drops both). false = off (bit-identical).
+        var additionalSummaryNeverArrives: Bool = false
         /// P2b (SC-7nqt.2): boot with leftover meters on the cumulative odometer,
         /// as if an earlier unterminated bout left them behind. JustRow entry
         /// resets it (P1 rule); a programmed piece shows the real stale window —
@@ -522,6 +555,15 @@ public final class VirtualPM5 {
             // conversions downstream (tick countdown, elapsed×100 wire bytes).
             if d.object(forKey: "VirtualPM5SummaryDelay") != nil {
                 c.summaryDelaySeconds = min(3600, max(0, d.double(forKey: "VirtualPM5SummaryDelay")))
+            }
+            // SC-7xs4 / SC-k4vu: the DROP knobs. Presence-only (no value to window) and
+            // DEFAULT OFF — a summary can never go missing unless a launch argument asked
+            // for it by name.
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5SummaryNeverArrives") {
+                c.summaryNeverArrives = true
+            }
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5AdditionalSummaryNeverArrives") {
+                c.additionalSummaryNeverArrives = true
             }
             if d.integer(forKey: "VirtualPM5InitialOdometer") > 0 {
                 c.initialOdometerMeters = min(1_000_000, max(0, d.integer(forKey: "VirtualPM5InitialOdometer")))
@@ -877,6 +919,11 @@ public final class VirtualPM5 {
         }
         if config.summaryDelaySeconds > 0 {
             print("🧪 VPM5 ⏲️ summary delay armed: 0x0039 held \(config.summaryDelaySeconds)s past workoutLogged")
+        }
+        if config.summaryNeverArrives {
+            print("🧪 VPM5 🕳️ summary-never-arrives ARMED (SC-7xs4): every piece is LOGGED on the erg but NEITHER its 0x0039 NOR its paired 0x003A is ever delivered\(config.summaryDelaySeconds > 0 ? " — composed with the \(config.summaryDelaySeconds)s hold, so each summary waits out the delay and is then dropped" : "")")
+        } else if config.additionalSummaryNeverArrives {
+            print("🧪 VPM5 🕳️ additional-summary-never-arrives ARMED (SC-7xs4): the 0x0039 lands normally, its paired 0x003A never does — splitCount/averageWatts/calories/restTime cannot merge")
         }
         if config.cooldownPieceMeters > 0 {
             print("🧪 VPM5 🧊 cooldown piece armed: athlete will key \(config.cooldownPieceMeters)m after the app piece logs")
@@ -2279,12 +2326,30 @@ public final class VirtualPM5 {
     }
 
     private func deliverSummary(_ data: Data, additional: Data, official: String) {
+        // The `official` line stays even when the frames are dropped: it is the ERG's own
+        // log-memory record, which a dropped BLE notification does not erase (the piece is
+        // still on the PM5's Memory menu). Suppressing it would model an erg that never
+        // finished the piece — a different, and much louder, failure.
         print(official)
-        emit(Self.endSummaryUUID, data)
+        // SC-7xs4 / SC-k4vu drop knobs, applied at the single choke point every summary
+        // passes through (immediate AND delayed alike), so they compose with
+        // -VirtualPM5SummaryDelay for free instead of fighting it.
+        if config.summaryNeverArrives {
+            print("🧪 VPM5 🕳️ 0x0039 DROPPED — end-of-workout summary NEVER delivered (SC-7xs4); the consumer's official time/distance/pace can never land, so any provisional/app-estimated marking is PERMANENT")
+        } else {
+            emit(Self.endSummaryUUID, data)
+        }
         // SC-fadm: the paired 0x003A rides right behind the 0x0039 (same logEntryDate/time)
         // so the app's merged() can pair them into one PM5-verified result.
-        emit(Self.additionalEndSummaryUUID, additional)
-        print("🧪 VPM5 🏁 piece additional (0x003A): \(additional.map { String(format: "%02X", $0) }.joined(separator: " "))")
+        if config.summaryNeverArrives || config.additionalSummaryNeverArrives {
+            // The emitted-frame log line lives in the ELSE branch on purpose: a line claiming
+            // a 0x003A went out when none did would make every log-grep oracle downstream
+            // read a drop as a delivery.
+            print("🧪 VPM5 🕳️ 0x003A DROPPED — additional end summary NEVER delivered (SC-7xs4); erg-truth calories, average watts, split count and total rest time can never merge")
+        } else {
+            emit(Self.additionalEndSummaryUUID, additional)
+            print("🧪 VPM5 🏁 piece additional (0x003A): \(additional.map { String(format: "%02X", $0) }.joined(separator: " "))")
+        }
         // P2c: the athlete starts the cooldown clock only after the app piece has
         // completed AND logged (its 0x0039 delivered). One-shot: the cooldown's
         // own summary lands here too but cooldownFired blocks a re-arm.
