@@ -2156,17 +2156,40 @@ public final class VirtualPM5 {
 
     private func emitFTMSPair() {
         let v = wireValues()
-        let watts = isRowingPhase && !scriptStopped && !wedged ? Int(wattsNow()) : 0
+        let rowingLive = isRowingPhase && !scriptStopped && !wedged
+        let watts = rowingLive ? Int(wattsNow()) : 0
         // SC-0wi8: a wedged erg reports no usable instantaneous pace. 0 is OUTSIDE the consumer's
         // 60 < paceRaw < 600 plausibility window (Concept2Manager.parseFitnessData), so the app
         // discards it and — because `currentPace` is only ever ASSIGNED inside that window and is
         // never cleared mid-piece — the rendered /500m holds its last good value forever. That
         // stale-hold is the SYMPTOM under test; do not "fix" it by emitting a valid slow pace.
-        let instPace = wedged ? 0 : Int(currentPace)
-        let meanPace = wedged ? 0 : Int(avgPace())
+        //
+        // SC-lb08: the same 0 is also what a REAL PM5 sends BEFORE the athlete has pulled, and
+        // this emitter used to publish a plausible pace there instead. Measured side by side on
+        // 2026-08-20, pre-flywheel, same workout:
+        //     a real PM5     FF 0A 00 00 00 00 00 00 00 00 …   InstPace 0x0000
+        //     this emulator  FF 0A 30 00 00 00 78 00 D6 00 …   InstPace 0x0078 = 120
+        // (and the 120 was not even the configured pace — config was 214, which the AvgPace field
+        // in the same frame reported correctly). The hardware truth is already recorded on
+        // SC-0wi8: 747 of 772 dumped 19-byte frames from the real erg carry InstPace 0x0000 and
+        // none carry 0xFFFF.
+        //
+        // WHY A COSMETIC-LOOKING BYTE MATTERED: it silently changed which defect a sim run
+        // exercised. SC-0wi8's device symptom is the app's pace gate anchoring on a slow FIRST
+        // PULL; in the sim the gate never got that far, because it anchored on this pre-start
+        // frame instead and then rejected every real sample from the other side. Same defect
+        // class, different trigger — and a fix verified only against the sim's version would not
+        // have proven the hardware one. An emulator that is wrong in a PLAUSIBLE direction makes
+        // the harness agree with you for the wrong reason.
+        //
+        // Stroke rate follows the 0x0032 rule verbatim (SC-2rqd): instantaneous flywheel cadence,
+        // so a rest-stroking athlete still shows, while the piece metrics stay 0.
+        let instPace = rowingLive ? Int(currentPace) : 0
+        let meanPace = rowingLive ? Int(avgPace()) : 0
+        let ftmsStrokeRate = (isRowingPhase || isRestStroking) ? config.strokeRate : 0
         // Variant A: flags 0x0AFF (19B) — MoreData=1, stroke fields absent.
         var a: [UInt8] = [0xFF, 0x0A]
-        a.append(UInt8(clamping: config.strokeRate * 2))        // avg stroke rate ×0.5spm
+        a.append(UInt8(clamping: ftmsStrokeRate * 2))           // avg stroke rate ×0.5spm
         a += u24LE(Int(v.distance))                             // total distance, whole m
         a += u16LE(instPace)                                    // inst pace, whole s
         a += u16LE(meanPace)                                    // avg pace
@@ -2178,7 +2201,7 @@ public final class VirtualPM5 {
         emit(Self.ftmsRowerDataUUID, Data(a))
         // Variant B: flags 0x0100 (10B) — stroke rate + count, energy; perMin always 0xFF.
         var b: [UInt8] = [0x00, 0x01]
-        b.append(UInt8(clamping: config.strokeRate * 2))
+        b.append(UInt8(clamping: ftmsStrokeRate * 2))           // SC-lb08: same gate as variant A
         b += u16LE(strokeCount)
         b += u16LE(Int(energyKcal))
         b += u16LE(Int(wattsNow() * 3.44 + 300))
