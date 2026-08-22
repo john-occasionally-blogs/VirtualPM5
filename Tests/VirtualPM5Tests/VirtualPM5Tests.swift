@@ -108,6 +108,53 @@ final class VirtualPM5EmulatorTests: XCTestCase {
                       "0x0031 payloads are 19 bytes per BLE spec p.13")
     }
 
+    /// The LIVE avg-pace fields (0x0032 bytes 9-10) report total-time ÷ total-distance like a
+    /// real PM5 — never the arithmetic mean of instantaneous paces. Discriminating by
+    /// construction: under this finishing-kick config the two formulas separate by >10 s/500m,
+    /// so the test fails if either the ratio basis or the kick behavior regresses.
+    func testLiveAvgPaceIsTotalTimeOverDistanceUnderFinishKick() throws {
+        var config = VirtualPM5.Config()
+        config.responseLatencySeconds = 0
+        config.startDelay = 0
+        config.seed = 42
+        config.paceSecondsPer500 = 150
+        config.finishKickPace = 65
+        config.finishKickAfterSeconds = 20
+        var log: [(CBUUID, Data)] = []
+        let erg = VirtualPM5(config: config, emit: { uuid, data in log.append((uuid, data)) })
+        erg.open()
+        send(PM5CommandBuilder.proprietaryFixedDistanceFrame(meters: 250, splitMeters: 250), to: erg)
+        var guardTicks = 0
+        while !log.contains(where: { $0.0 == VirtualPM5.endSummaryUUID }), guardTicks < 400 {
+            erg.tick()
+            guardTicks += 1
+        }
+        XCTAssertLessThan(guardTicks, 400, "piece must complete and emit a 0x0039")
+
+        let sumIdx = try XCTUnwrap(log.firstIndex { $0.0 == VirtualPM5.endSummaryUUID })
+        let summary = try XCTUnwrap(PM5EndOfWorkoutSummaryPacket.parse([UInt8](log[sumIdx].1)))
+        let truePace = summary.elapsedTime / (summary.distance / 500.0)
+
+        let status1 = { (slice: ArraySlice<(CBUUID, Data)>) -> [[UInt8]] in
+            slice.filter { $0.0 == VirtualPM5.additionalStatus1UUID }.map { [UInt8]($0.1) }
+        }
+        let livePaces = status1(log[..<sumIdx])
+            .map { Double(Int($0[7]) | (Int($0[8]) << 8)) / 100.0 }
+            .filter { $0 > 0 }
+        XCTAssertGreaterThan(livePaces.count, 10, "rowing 0x0032 frames must flow")
+        let tickMean = livePaces.reduce(0, +) / Double(livePaces.count)
+        XCTAssertGreaterThan(abs(truePace - tickMean), 10.0,
+                             "fixture must discriminate: the two formulas must separate")
+
+        let last = try XCTUnwrap(status1(log[...]).last)
+        let avgPaceWire = Double(Int(last[9]) | (Int(last[10]) << 8)) / 100.0
+        XCTAssertEqual(avgPaceWire, truePace, accuracy: 3.0,
+                       "live avg pace must be total-time ÷ total-distance")
+        XCTAssertGreaterThan(abs(avgPaceWire - tickMean), 5.0,
+                             "live avg pace must NOT be the tick-mean of instantaneous paces")
+        erg.stop()
+    }
+
     func testCapturedFixtureShipsWithPackage() throws {
         let url = try XCTUnwrap(Bundle.module.url(
             forResource: "pm5-piece-250m", withExtension: "jsonl", subdirectory: "Fixtures"))

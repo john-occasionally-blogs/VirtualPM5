@@ -238,10 +238,11 @@ public final class VirtualPM5 {
         /// "persisted the final stroke" (feedback_mocks_must_discriminate). Real athletes sprint
         /// the last 30s; a real 5-min device capture finished 4.7 s/500m faster than its mean,
         /// which is exactly what made the defect visible on hardware and invisible on the sim.
-        /// 0 = OFF, bit-identical to today. Known gap this knob exposes: the emulator's 0x0039
-        /// averagePace is the tick-mean of instantaneous paces rather than total-time ÷
-        /// total-distance as a real PM5 reports — identical under constant pace, ~6% apart under
-        /// a kick (SC-flvf).
+        /// 0 = OFF, bit-identical to today. NB the 0x0039 summary pace was never part of the
+        /// SC-flvf gap — it computes total-time ÷ total-distance directly in the summary
+        /// emitter; the gap this knob exposed was the LIVE avg-pace fields (0x0032 / 0x0033
+        /// split / FTMS), which rode a tick-mean of instantaneous paces until SC-flvf aligned
+        /// avgPace() to elapsed/(distance/500).
         var finishKickPace: Double = 0
         var finishKickAfterSeconds: Double = 20
         /// SC-3wbx HR RECOVERY: once a piece is over, heart rate decays toward `hrRecoveryRestingBPM`
@@ -583,8 +584,18 @@ public final class VirtualPM5 {
             // erg flywheel-starts ~2s into the rest window and rows real meters DURING rest —
             // the early pull the app's counting-gate must discard. Explicit overrides win.
             if ProcessInfo.processInfo.arguments.contains("-VirtualPM5RIRTPullDuringRest") {
-                if d.object(forKey: "VirtualPM5Pace") == nil { c.paceSecondsPer500 = 62 }
-                if d.object(forKey: "VirtualPM5StartDelay") == nil { c.startDelay = 2 }
+                let paceOverridden = d.object(forKey: "VirtualPM5Pace") != nil
+                let delayOverridden = d.object(forKey: "VirtualPM5StartDelay") != nil
+                if !paceOverridden { c.paceSecondsPer500 = 62 }
+                if !delayOverridden { c.startDelay = 2 }
+                // SC-s2a3: the tuned 62/2 window is what makes the SC-is2m.1 scenario real; an
+                // explicit pace/startDelay override silently detunes it, so the two outcomes
+                // print DISTINCT markers.
+                if paceOverridden || delayOverridden {
+                    print("🧪 VPM5 🔒 is2m pull-during-rest DETUNED by explicit override — pace=\(c.paceSecondsPer500)s/500m startDelay=\(c.startDelay)s (tuned window NOT armed)")
+                } else {
+                    print("🧪 VPM5 🔒 is2m pull-during-rest scenario armed — tuned defaults pace=62s/500m startDelay=2s")
+                }
             }
             // SC-7nqt.12: unbounded zombie-interval scenario (real erg ignores the 0x18 count).
             if ProcessInfo.processInfo.arguments.contains("-VirtualPM5IntervalUnbounded") {
@@ -2405,8 +2416,22 @@ public final class VirtualPM5 {
         }
     }
 
+    /// SC-flvf: a real PM5's live average pace is time-per-distance — elapsed / (distance/500),
+    /// which inherently counts dead time — never the arithmetic mean of instantaneous paces
+    /// (identical at one constant pace, ~6% flattering under a finishing kick). The pieceStart*
+    /// baselines matter: a TIME piece runs over RETAINED counters (its arm never resets them),
+    /// and during native intervals `elapsed`/`distance` are per-round, so this reads as the
+    /// current-interval average — the 0x0033 "split" semantics. The 0x0039 summary computes its
+    /// own pace from frozen totals and never calls this. Zero-distance fallback (pre-pull /
+    /// armed): the historic tick-mean, then the configured base pace — byte-identical to the
+    /// old pre-pull behavior (see the SC-lb08 side-by-side note in the FTMS emitter).
     private func avgPace() -> Double {
-        paceSamples > 0 ? avgPaceAccumulator / Double(paceSamples) : config.paceSecondsPer500
+        let e = elapsed - pieceStartElapsed
+        let d = distance - pieceStartDistance
+        guard d > 0, e > 0 else {
+            return paceSamples > 0 ? avgPaceAccumulator / Double(paceSamples) : config.paceSecondsPer500
+        }
+        return e / (d / 500.0)
     }
 
     private func strapByteFor0032() -> UInt8 {
