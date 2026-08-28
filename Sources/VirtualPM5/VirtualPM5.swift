@@ -119,6 +119,14 @@
 //                               counters, programs land normally) and -VirtualPM5LingerJustRow
 //                               (the APP programs the Just Row itself → exercises only the
 //                               proxy-flag path b888 proved insufficient).
+//  -VirtualPM5HRHoldSeconds <s>  (SemperClock-mwqp2, DEVICE-CONFIRMED 2026-08-27) a
+//                               PM5-relayed strap drop is a FLAT LINE, not silence: the erg
+//                               REPEATS the last HR value at full cadence (measured 123 bpm x
+//                               45.5s, 114 identical samples, 0.81s gaps). NOT a gap knob — a
+//                               gap models ABSENCE, this models PRESENCE OF A LIE, and any
+//                               detector keyed on silence / last-sample-age / sample-count
+//                               reads healthy straight through it. Window starts at
+//                               -VirtualPM5HRHoldAt <s> of ROWING time (default 30).
 //  -VirtualPM5DirtyOdometerRejectGoFinished  (SC-o1ur review) rides ON TOP of
 //                               -VirtualPM5DirtyOdometer: while the linger holds workoutRow,
 //                               GoFinished is REJECTED (proper CSAFE reject status, linger
@@ -270,6 +278,24 @@ public final class VirtualPM5 {
         /// Strap paired to the erg: HR in 0x0032[6] + FTMS[16] + 0x0039[11].
         /// No strap: 0xFF / 0x00 / 0x00 (captured sentinel difference per channel).
         var strapPresent: Bool = true
+        /// SemperClock-mwqp2 (DEVICE-CONFIRMED 2026-08-27 on a physical PM5): a PM5-RELAYED strap drop
+        /// is a FLAT LINE, not silence — the erg REPEATS the last HR value at full cadence.
+        /// Measured: 123 bpm held 45.5 s, 114 identical samples, inter-sample gap 0.81 s.
+        ///
+        /// THIS IS NOT A VARIANT OF A GAP KNOB, and that distinction is the whole point: a gap
+        /// models ABSENCE (samples stop). This models PRESENCE OF A LIE — every frame keeps
+        /// arriving, well-formed, at the normal rate, and only the CONTENT is frozen. Any
+        /// detector built on silence, last-sample-age or sample-count reads perfectly healthy
+        /// straight through it, so a cure for one can be blind to the other.
+        ///
+        /// `hrHoldSeconds` is how long the freeze lasts; 0 = off (default, no behaviour change).
+        var hrHoldSeconds: Double = 0
+        /// When the freeze begins, in seconds of SESSION time (`totalTicks` x 0.5s) — the
+        /// monotonic clock, NOT per-piece rowing time, so the window is a single event that
+        /// spans interval boundaries the way a real strap drop does. Default 30 s: late enough
+        /// that the ramp has climbed well clear of `hrStart` (so the frozen value is
+        /// distinguishable from the starting one), early enough to fit inside short fixtures.
+        var hrHoldAtSeconds: Double = 30
         /// Seeded RNG so any run is replayable (seed printed in the session header).
         var seed: UInt64 = 0
         /// Piece-clock script events, e.g. "stop@120,resume@130" (P1b: stop/resume only).
@@ -632,6 +658,14 @@ public final class VirtualPM5 {
                     c.rowDuringRestQuietSeconds = min(60, max(0, d.double(forKey: "VirtualPM5RowDuringRestQuiet")))
                 }
             }
+            // SemperClock-mwqp2: PM5-relayed strap drop = REPEAT-LAST-VALUE at unchanged cadence
+            // (device truth 2026-08-27: 123 bpm x 45.5 s, 114 identical samples, 0.81 s gaps).
+            if d.double(forKey: "VirtualPM5HRHoldSeconds") > 0 {
+                c.hrHoldSeconds = min(3600, max(0, d.double(forKey: "VirtualPM5HRHoldSeconds")))
+                if d.object(forKey: "VirtualPM5HRHoldAt") != nil {
+                    c.hrHoldAtSeconds = min(3600, max(0, d.double(forKey: "VirtualPM5HRHoldAt")))
+                }
+            }
             // SC-qv39: spindown residual — the ERG DAY 2026-08-14 dirty re-arm (d=19.8): the
             // next resetting-native install after a piece end is accepted ONTO residual
             // flywheel meters (counter pre-load, no reset ever; one-shot).
@@ -835,6 +869,23 @@ public final class VirtualPM5 {
     private var pieceStartDistance: Double = 0
     private var dragFactor: Int = 0
     private var rowingTicks = 0
+    /// SemperClock-mwqp2 one-shot log flags for the HR hold window.
+    private var hrHoldLogged = false
+    private var hrHoldReleaseLogged = false
+    /// True while the mwqp2 strap-drop freeze is in effect.
+    ///
+    /// Keyed on `totalTicks` — the MONOTONIC session clock — deliberately. The first cut keyed it
+    /// on `rowingTicks`, which is reset to 0 at every piece/interval start (:1760), so on an
+    /// interval fixture the window RE-ARMED once per interval instead of being the single event a
+    /// strap drop actually is. Measured: engaged at 110 bpm in interval 1, then interval 2 reset
+    /// the clock and `currentHR` and the release logged "resumes from 95 bpm" — a freeze that
+    /// unfroze. A real strap drop does not care where the interval boundaries are.
+    private var hrHoldActive: Bool {
+        guard config.hrHoldSeconds > 0 else { return false }
+        let sessionSeconds = Double(totalTicks) * 0.5
+        return sessionSeconds >= config.hrHoldAtSeconds
+            && sessionSeconds < config.hrHoldAtSeconds + config.hrHoldSeconds
+    }
     private var armedTicks = 0
     private var scriptStopped = false
     /// SC-7nqt.11 native-interval (0x07) state. `intervalRoundsRemaining` counts DOWN
@@ -1715,7 +1766,11 @@ public final class VirtualPM5 {
             if Double(armedTicks) * 0.5 >= config.startDelay || athleteAlreadyPulling {
                 rowingTicks = 0
                 dragFactor = 0
-                currentHR = Double(config.hrStart)
+                // SemperClock-mwqp2: a frozen strap keeps REPEATING its last value across an
+                // interval boundary — the erg has nothing new to report, so it reports the old
+                // thing. Resetting to hrStart here is what silently thawed the first cut of this
+                // knob (110 bpm engaged, 95 bpm on release).
+                if !hrHoldActive { currentHR = Double(config.hrStart) }
                 // TIME pieces run over RETAINED counters — completion and the
                 // 0x0039 measure from this baseline. Everything else starts at 0.
                 if case .time = piece {
@@ -1784,7 +1839,23 @@ public final class VirtualPM5 {
                 if rowingTicks > 2 { dragFactor = 122 + Int(rng.next() % 3) }
                 // HR ramp ~0.55 bpm/s toward peak with ±1 jitter
                 if config.strapPresent {
-                    currentHR = min(Double(config.hrPeak), currentHR + 0.275) + Double(Int.random(in: -1...1, using: &rng))
+                    // SemperClock-mwqp2: during the hold window currentHR is left EXACTLY as it
+                    // was — not zeroed, not sentinelled. Every subsequent 0x0032[6] / FTMS[16] /
+                    // 0x0039[11] therefore repeats the same byte at the normal cadence, which is
+                    // what the real erg does when a strap drops. Nothing about the stream's
+                    // timing changes, so silence-based and age-based detectors see nothing.
+                    if hrHoldActive {
+                        if !hrHoldLogged {
+                            hrHoldLogged = true
+                            logTransition("SemperClock-mwqp2 HR HOLD engaged: \(Int(currentHR)) bpm frozen for \(Int(config.hrHoldSeconds))s at unchanged cadence — the strap dropped but the erg keeps REPEATING the last value (device truth 2026-08-27)")
+                        }
+                    } else {
+                        if hrHoldLogged, !hrHoldReleaseLogged {
+                            hrHoldReleaseLogged = true
+                            logTransition("SemperClock-mwqp2 HR HOLD released after \(Int(config.hrHoldSeconds))s — ramp resumes from \(Int(currentHR)) bpm")
+                        }
+                        currentHR = min(Double(config.hrPeak), currentHR + 0.275) + Double(Int.random(in: -1...1, using: &rng))
+                    }
                 }
                 let energyDelta = (wattsNow() * 3.44 + 300.0) / 3600.0 * 0.5
                 energyKcal += energyDelta
