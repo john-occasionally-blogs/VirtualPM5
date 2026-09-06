@@ -540,14 +540,41 @@ public final class VirtualPM5 {
         /// but from cold boot. nil = off.
         var initialInProgress: (targetMeters: Int, currentMeters: Int)?
 
+        /// SemperClock-p9h7z: the pace that was ASKED FOR and refused, when it was present but
+        /// outside the band. `nil` when nothing was refused. Recorded so the session-start line
+        /// can say a request was dropped — the log used to print only the EFFECTIVE pace, which
+        /// is true and gives no hint that a different one was requested.
+        var refusedPaceRequest: Double?
+
+        /// SemperClock-p9h7z — THE BAND, IN ONE PLACE, AND PURE SO A TEST CAN REACH IT.
+        ///
+        /// `-VirtualPM5Pace 58` used to be swallowed in silence: it fails `> 60` on BOTH branches
+        /// below, nothing assigns, and the run proceeds at the DEFAULT 120 s/500m while looking
+        /// entirely normal. That is how it came to be filed as a non-monotonic knob — pace 70 gave
+        /// 977 W and "pace 58" gave 213 W, which is simply the default's 202.5 W plus jitter. The
+        /// ordering was never violated; the request was discarded.
+        ///
+        /// The fallback is KEPT deliberately — refusing to launch would redden every rig that
+        /// passes a stale value — but it is no longer silent.
+        static func resolvePace(requested: Double?, fallback: Double) -> (pace: Double, refused: Double?) {
+            guard let r = requested else { return (fallback, nil) }
+            return (r > 60 && r < 600) ? (r, nil) : (fallback, r)
+        }
+
         public static func fromLaunchArguments() -> Config {
             var c = Config()
             let d = UserDefaults.standard  // NSArgumentDomain carries -Key value pairs
-            if let pace = d.object(forKey: "VirtualPM5Pace") as? String, let v = Double(pace), v > 60, v < 600 {
-                c.paceSecondsPer500 = v
-            } else if d.double(forKey: "VirtualPM5Pace") > 60 {
-                c.paceSecondsPer500 = d.double(forKey: "VirtualPM5Pace")
-            }
+            // SemperClock-p9h7z: the band check moved into `resolvePace` so it is pure, testable,
+            // and stated once. Behaviour for an IN-BAND value is unchanged.
+            let requestedPace: Double? = {
+                guard d.object(forKey: "VirtualPM5Pace") != nil else { return nil }
+                if let s = d.object(forKey: "VirtualPM5Pace") as? String { return Double(s) }
+                let n = d.double(forKey: "VirtualPM5Pace")
+                return n == 0 ? nil : n
+            }()
+            let resolved = Config.resolvePace(requested: requestedPace, fallback: c.paceSecondsPer500)
+            c.paceSecondsPer500 = resolved.pace
+            c.refusedPaceRequest = resolved.refused
             // SC-mib2: windowed into the app's pace plausibility band like -VirtualPM5Pace, so a
             // typo cannot produce a stream the app silently filters out (which would read as a
             // broken fixture rather than a bad argument).
@@ -970,6 +997,12 @@ public final class VirtualPM5 {
         self.rng = SeededRNG(state: config.seed)
         self.emit = emit
         self.onDisconnectRequest = onDisconnectRequest
+        // SemperClock-p9h7z: a REFUSED pace request is announced on the same line that reports the
+        // effective one. The old line printed only `pace=120s/500m` — true, and silent about the
+        // fact that a different pace had been asked for and dropped.
+        if let refused = config.refusedPaceRequest {
+            print("🧪 VPM5 ⚠️ -VirtualPM5Pace \(refused) is OUTSIDE the valid band (60 < pace < 600 s/500m) — IGNORED. Rowing at \(config.paceSecondsPer500)s/500m instead. This run is NOT the pace you asked for. (SemperClock-p9h7z)")
+        }
         print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) hrRecovery=\(config.hrRecoveryRestingBPM > 0 ? "\(config.hrRecoveryRestingBPM)bpm/tau\(Int(config.hrRecoveryTau))s" : "off") kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off")")
         if config.initialOdometerMeters > 0 {
             // P2b: leftover values from an earlier bout, visible in the idle 0x0031
