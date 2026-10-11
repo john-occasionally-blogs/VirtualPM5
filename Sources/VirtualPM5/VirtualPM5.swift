@@ -51,7 +51,9 @@
 //    REJECTED in BOTH dialects — captured F1 99; the capture was itself a public
 //    0x87 re-program. TERMINATE mid-row really terminates (uncaptured corner,
 //    modeled so the app's TERMINATE→program recovery grammar still works against
-//    the never-stops-pulling virtual athlete).
+//    a virtual athlete who never stops pulling MID-PIECE; between pieces the
+//    default athlete re-mounts startDelay after any arm, and
+//    -VirtualPM5StepOffSeconds holds them off the erg — SemperClock-n8e4).
 //  P2 native intervals (SC-7nqt.11, FIXEDDIST_INTERVAL 0x07): each work interval resets
 //  elapsed+distance at its start (log16); byte-8 walks 0x05 work → 0x09 work→rest → 0x03 rest
 //  — the 0x05→0x09→0x03 SEQUENCE is CONFIRMED by the 2026-07-20 capture (SC-7nqt.5); only the
@@ -101,8 +103,9 @@
 //                               consumer's fresh-piece gate reaches its timeout and must run its
 //                               recovery. Reproduces the 2026-08-04 real-firmware wedge and
 //                               defeats this emulator's instant-reset blindspot. While on,
-//                               GoFinished from a LIVE piece is also accepted (spec-legal,
-//                               UNPROVEN on hardware).
+//                               GoFinished from a LIVE piece is also accepted — a MODEL choice
+//                               the device contradicts: a real PM5 mid-piece REJECTED
+//                               GoFinished (F1 19 19, 2026-08-14 tether :1229; SemperClock-zm5vr).
 //  -VirtualPM5DirtyOdometer <m> (SC-o1ur attempt 6) boot as a LINGERING UN-TERMINATED Just Row:
 //                               phase workoutRow, workoutType 0x01, odometer already at <m>,
 //                               athlete stepped off (distance FROZEN, piece clock ticking — the
@@ -113,9 +116,13 @@
 //                               the phase stays workoutRow (b888 L1847 — no fresh sub-50m frame
 //                               ever lands); TERMINATE is ACKed and IGNORED (2026-08-04 tether
 //                               truth — a bare-TERMINATE fix cannot pass this knob); GoFinished
-//                               ENDS the linger (hardware-UNPROVEN, the standing 0x86-from-
-//                               workoutRow device-day question), after which the erg behaves
-//                               normally. Distinct from -VirtualPM5InitialOdometer (idle stale
+//                               ENDS the linger — the OPTIMISTIC branch, which the device did
+//                               NOT show: on 2026-08-14 a real PM5 lingering mid-piece REJECTED
+//                               GoFinished and was cleared by GoIdle → TERMINATE → settled at
+//                               waitToBegin → a clean next arm, 2 of 2 walks (tether :1214-:1330,
+//                               :20497-:20583; SemperClock-zm5vr). After it the erg behaves
+//                               normally. -VirtualPM5DirtyOdometerRejectGoFinished is the
+//                               device-faithful 0x86; no knob yet models the GoIdle escape. Distinct from -VirtualPM5InitialOdometer (idle stale
 //                               counters, programs land normally) and -VirtualPM5LingerJustRow
 //                               (the APP programs the Just Row itself → exercises only the
 //                               proxy-flag path b888 proved insufficient).
@@ -173,6 +180,14 @@
 //                               (defeats the detector's quiet-tick gate BY DESIGN — proves the
 //                               gate); quiet under ~2s risks the app's 1Hz rest sampler missing
 //                               the quiet window entirely.
+//  -VirtualPM5StepOffSeconds <s> (SemperClock-n8e4, owner ruling 2026-10-10) after each piece ENDS the
+//                               athlete STEPS OFF the erg for <s> seconds (the round's other
+//                               movements) and an armed piece waits for them: flywheel start =
+//                               max(arm + startDelay, piece end + <s>). Without it the default
+//                               athlete re-mounts startDelay after ANY arm, so a mixed round
+//                               (row -> floor -> row) whose app arms the next piece during the
+//                               floor leg rowed that piece through the floor. 0 < s <= 600; the
+//                               first piece is never held; refused beside -VirtualPM5RowDuringRest.
 //  -VirtualPM5SpindownResidual <m>  (SC-qv39) the ERG DAY 2026-08-14 spindown-residual truth
 //                               (2-up RFT RowCal, build 994: re-arm during flywheel spindown →
 //                               ARM-ODOMETER DIRTY d=19.8, piece armed ONTO the residual). After
@@ -373,8 +388,9 @@ public final class VirtualPM5 {
         /// (and therefore exactly one recovery walk) whatever the surrounding choreography.
         ///
         /// While the flag is on, GoFinished (0x86) from a LIVE piece is also accepted, modelling
-        /// the spec-legal escape the recovery walk depends on. Whether real firmware honours
-        /// GoFinished from a live `workoutRow` is UNPROVEN — device-day question.
+        /// the spec-legal escape the recovery walk depends on. ANSWERED on hardware since: real
+        /// firmware does NOT honour GoFinished from a live `workoutRow` — it REJECTED it (F1 19 19)
+        /// (2026-08-14 tether, build_results/ergday-20260814/iphone-tether.log) :1229; SemperClock-zm5vr), so this accepting branch is a model only.
         /// 0 = OFF, bit-identical to today.
         var stuckWorkoutRowIgnoreCount: Int = 0
         var stuckWorkoutRow: Bool { stuckWorkoutRowIgnoreCount > 0 }
@@ -396,9 +412,12 @@ public final class VirtualPM5 {
         ///     (2026-08-04 tether truth: TERMINATE at workoutRow left the next 0x0031
         ///     byte-identical but for elapsed) — a fix that fires only a bare TERMINATE
         ///     therefore CANNOT go green against this knob;
-        ///   • GoFinished ENDS the linger (hardware-UNPROVEN — the same 0x86-from-workoutRow
-        ///     open question flagged on recoverStuckFreshPieceGate; device-day item), after
-        ///     which GoIdle / TERMINATE / programs behave normally.
+        ///   • GoFinished ENDS the linger — the OPTIMISTIC branch. MEASURED otherwise on
+        ///     hardware (2026-08-14 tether, build_results/ergday-20260814/iphone-tether.log): a PM5 lingering
+        ///     mid-piece (:1212, workoutRow d=76.8 m) REJECTED GoFinished (:1229, F1 19 19); GoIdle
+        ///     (:1263) → TERMINATE (:1295) → settled at waitToBegin (:1298) → the next arm CLEAN
+        ///     (:1330, d=0.0); the same on a calorie piece (:20497-:20583) — 2 of 2 walks escaped
+        ///     (SemperClock-zm5vr). After this branch GoIdle / TERMINATE / programs behave normally.
         /// 0 = off, bit-identical to today. Distinct from `initialOdometerMeters` (erg IDLE on
         /// stale counters; a program's armed zeros land normally) and from the app-side
         /// -VirtualPM5LingerJustRow harness (the APP programs the Just Row itself, which only
@@ -477,6 +496,15 @@ public final class VirtualPM5 {
         /// quiet-tick gate then correctly refuses to fire, which is itself a provable property.
         /// Meaningless without `rowDuringRest`.
         var rowDuringRestQuietSeconds: Double = 3.0
+        /// SemperClock-n8e4 (owner ruling 2026-10-10): `-VirtualPM5StepOffSeconds <s>` — after each piece ENDS
+        /// (its own target, or a TERMINATE mid-row) the virtual athlete steps OFF the erg for `<s>` seconds, doing the
+        /// round's other movements, and an armed piece does not start until they are back:
+        /// flywheel start = max(arm + startDelay, piece end + s). The default athlete re-mounts `startDelay` after every
+        /// arm, so in a mixed round (row → floor → row) whose app arms the next piece DURING the floor leg it rowed that
+        /// piece through the floor (measured 20260822-170421, AMRAPRowGate: only R1 rowed its 250 m; R3-R8 were
+        /// byte-identical 69 m). The first piece of a session is never held. 0 = off, bit-identical. Mutually
+        /// exclusive with `rowDuringRest` (the opposite athlete): the pair is refused, never merged.
+        var stepOffSeconds: Double = 0
         /// SC-qv39: `-VirtualPM5SpindownResidual <m>` — the ERG DAY 2026-08-14 device truth
         /// (tether build_results/ergday-20260814/iphone-tether.log, RFT window after L20488):
         /// a round re-arm fired while the flywheel was still spinning down and the erg ACCEPTED
@@ -683,6 +711,18 @@ public final class VirtualPM5 {
                 c.rowDuringRest = true
                 if d.object(forKey: "VirtualPM5RowDuringRestQuiet") != nil {
                     c.rowDuringRestQuietSeconds = min(60, max(0, d.double(forKey: "VirtualPM5RowDuringRestQuiet")))
+                }
+            }
+            // SemperClock-n8e4: the athlete steps off between pieces, (0, 600] s. A bad value or the pair with
+            // -VirtualPM5RowDuringRest REFUSES (prints why, step-off stays off) — never clamped into a different knob.
+            if d.object(forKey: "VirtualPM5StepOffSeconds") != nil {
+                let s = d.double(forKey: "VirtualPM5StepOffSeconds")
+                if c.rowDuringRest {
+                    print("🧪 VPM5 ❌ -VirtualPM5StepOffSeconds REFUSED beside -VirtualPM5RowDuringRest (opposite athletes) — step-off OFF (SemperClock-n8e4)")
+                } else if s > 0, s <= 600 {
+                    c.stepOffSeconds = s
+                } else {
+                    print("🧪 VPM5 ❌ -VirtualPM5StepOffSeconds '\(d.string(forKey: "VirtualPM5StepOffSeconds") ?? "?")' REFUSED — needs (0, 600] seconds; step-off OFF (SemperClock-n8e4)")
                 }
             }
             // SemperClock-mwqp2: PM5-relayed strap drop = REPEAT-LAST-VALUE at unchanged cadence
@@ -914,6 +954,19 @@ public final class VirtualPM5 {
             && sessionSeconds < config.hrHoldAtSeconds + config.hrHoldSeconds
     }
     private var armedTicks = 0
+    /// SemperClock-n8e4 (`-VirtualPM5StepOffSeconds`): the tick at which the stepped-off athlete is back on the erg —
+    /// set at each piece end, cleared by the flywheel start it held. nil = on the erg (always nil with the knob off).
+    private var stepOffUntilTick: Int?
+    /// SemperClock-n8e4: one "armed, athlete still off" line per wait, not one per tick.
+    private var stepOffWaitAnnounced = false
+
+    /// SemperClock-n8e4: the athlete leaves the erg for `stepOffSeconds` (no-op with the knob off).
+    private func athleteStepsOff(after why: String) {
+        guard config.stepOffSeconds > 0 else { return }
+        stepOffUntilTick = totalTicks + Int((config.stepOffSeconds / 0.5).rounded(.up))
+        stepOffWaitAnnounced = false
+        print("🧪 VPM5 🚶 athlete STEPS OFF the erg for \(String(format: "%.1f", config.stepOffSeconds))s after \(why) — an armed piece waits for them (SemperClock-n8e4)")
+    }
     private var scriptStopped = false
     /// SC-7nqt.11 native-interval (0x07) state. `intervalRoundsRemaining` counts DOWN
     /// from the programmed round count (0x18 SET_WORKOUTINTERVALCOUNT). Per-interval
@@ -1003,7 +1056,7 @@ public final class VirtualPM5 {
         if let refused = config.refusedPaceRequest {
             print("🧪 VPM5 ⚠️ -VirtualPM5Pace \(refused) is OUTSIDE the valid band (60 < pace < 600 s/500m) — IGNORED. Rowing at \(config.paceSecondsPer500)s/500m instead. This run is NOT the pace you asked for. (SemperClock-p9h7z)")
         }
-        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) hrRecovery=\(config.hrRecoveryRestingBPM > 0 ? "\(config.hrRecoveryRestingBPM)bpm/tau\(Int(config.hrRecoveryTau))s" : "off") kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off")")
+        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) hrRecovery=\(config.hrRecoveryRestingBPM > 0 ? "\(config.hrRecoveryRestingBPM)bpm/tau\(Int(config.hrRecoveryTau))s" : "off") kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off") stepOff=\(config.stepOffSeconds > 0 ? String(format: "%.1fs", config.stepOffSeconds) : "off")")
         if config.initialOdometerMeters > 0 {
             // P2b: leftover values from an earlier bout, visible in the idle 0x0031
             // stream and through the program-accept stale window until armed zeros
@@ -1131,8 +1184,8 @@ public final class VirtualPM5 {
         // SC-0wi8: GoIdle (0x82) into a live piece whose definition was just binned is THE
         // destructive step — hardware truth #3, the User ID screen yank, with the reprogram then
         // installing-then-erasing. GoFinished (0x86) is deliberately NOT a wedge trigger: the app
-        // sends a routine SEGMENT_GO_FINISHED at every segment teardown, and 0x86 from a live
-        // workoutRow is flagged HARDWARE-UNPROVEN in this repo (see recoverStuckFreshPieceGate).
+        // sends a routine SEGMENT_GO_FINISHED at every segment teardown, and on hardware 0x86 from
+        // a live workoutRow is simply REJECTED (2026-08-14 tether :1229, F1 19 19; SemperClock-zm5vr).
         // Modelling it as destructive produced exactly that false positive — a wedge fired by
         // normal choreography AFTER the fix had already saved the piece.
         if config.offlineACKWhileRowing, first == 0x86 || first == 0x82 {
@@ -1153,13 +1206,13 @@ public final class VirtualPM5 {
             routePublicCombined(contents)
         case 0x86: // GoFinished — rejected unless inUse (17/17 captured)
             // SC-o1ur: in the stuck-workoutRow scenario the app sends GoFinished to END a live
-            // piece before terminating it. That is spec-legal but UNCAPTURED on hardware (every
-            // captured 0x86 came from an already-logged state), so it is modelled ONLY under the
-            // harness flag — the device-day question is whether real firmware honours it.
-            // SC-o1ur (`-VirtualPM5DirtyOdometer`): GoFinished ENDS the lingering Just Row —
-            // the modeled escape the state-aware un-park walk depends on (hardware-UNPROVEN,
-            // the same 0x86-from-workoutRow open question as recoverStuckFreshPieceGate;
-            // standing device-day item). Counters CARRY OVER into the idle park — a Just Row
+            // piece before terminating it. Spec-legal, and modelled ONLY under the harness flag;
+            // CAPTURED on hardware since — real firmware REJECTED it (2026-08-14 tether :1229,
+            // F1 19 19; SemperClock-zm5vr), so the accepting branch is a model, not a truth.
+            // SC-o1ur (`-VirtualPM5DirtyOdometer`): GoFinished ENDS the lingering Just Row — the
+            // OPTIMISTIC escape the un-park walk was written against. The device took the other
+            // branch: GoFinished REJECTED, then GoIdle → TERMINATE → settled at waitToBegin → a
+            // clean next arm, 2 of 2 walks (tether :1214-:1330, :20497-:20583). Counters CARRY OVER into the idle park — a Just Row
             // has no 0x0039 to emit — and the next program's armed zeros finally clear them.
             // SC-o1ur review (`-VirtualPM5DirtyOdometerRejectGoFinished`): the PESSIMISTIC
             // firmware branch — GoFinished from the lingering workoutRow is REJECTED outright
@@ -1178,7 +1231,7 @@ public final class VirtualPM5 {
                 slaveState = .finished
                 respond(reject: false, echo: [])
                 phase = .idle
-                logTransition("GoFinished accepted — lingering Just Row ENDED (carryover \(String(format: "%.1f", distance))m parked idle; SC-o1ur dirty-linger model, 0x86-from-workoutRow hardware-UNPROVEN)")
+                logTransition("GoFinished accepted — lingering Just Row ENDED (carryover \(String(format: "%.1f", distance))m parked idle; SC-o1ur dirty-linger model only — the device REJECTS this (2026-08-14 tether))")
                 return
             }
             // SC-lnp1 (`-VirtualPM5IgnoreTerminateAtWorkoutRow`): GoFinished from a LIVE piece
@@ -1195,7 +1248,7 @@ public final class VirtualPM5 {
                 slaveState = .finished
                 respond(reject: false, echo: [])
                 if case .rowing(let piece) = phase {
-                    endPiece(piece, note: "GoFinished on a LIVE piece → ended (UNPROVEN on hardware; -VirtualPM5StuckWorkoutRow model)")
+                    endPiece(piece, note: "GoFinished on a LIVE piece → ended (-VirtualPM5StuckWorkoutRow model only — the device REJECTS this (2026-08-14 tether))")
                 } else {
                     logTransition("GoFinished accepted on a live-but-not-rowing phase (-VirtualPM5StuckWorkoutRow model)")
                 }
@@ -1535,7 +1588,7 @@ public final class VirtualPM5 {
             // UNCAPTURED corner: TERMINATE during an actively-rowing single piece (or a
             // mid-interval rest in the default count-honoring mode) — modeled as a real
             // termination (live values go stale, then the cleared idle park; no 0x0039, the
-            // piece never completed). The virtual athlete never stops pulling, so a flash-only
+            // piece never completed). The virtual athlete never stops pulling MID-PIECE, so a flash-only
             // no-op here would strand the phase in .rowing forever and the F1 99 program reject
             // above would turn the app's TERMINATE→program recovery grammar (fresh-piece gate
             // timeout, mid-row reset/restart) into a permanent stall — a shape real hardware
@@ -1544,6 +1597,7 @@ public final class VirtualPM5 {
             phase = .staleWindow(framesLeft: 2, then: .clearToIdle)
             slaveState = .ready
             logTransition("TERMINATE mid-row → stale window → cleared idle (UNCAPTURED corner, modeled as real termination — no 0x0039)")
+            athleteStepsOff(after: "a TERMINATE mid-row")   // SemperClock-n8e4
         default:
             // Captured: terminate with nothing parked leaves counters UNCHANGED and
             // flashes a single 0x0B frame.
@@ -1796,7 +1850,15 @@ public final class VirtualPM5 {
             // when the program lands — no startDelay wind-up. This is what banks 0x0031 meters
             // into the armed piece during the remaining rest (the SC-qq4w shape).
             let athleteAlreadyPulling = isRestStroking
-            if Double(armedTicks) * 0.5 >= config.startDelay || athleteAlreadyPulling {
+            // SemperClock-n8e4: a stepped-off athlete is not on the erg yet, however long the piece has been armed.
+            let athleteOnErg = stepOffUntilTick.map { totalTicks >= $0 } ?? true
+            if !athleteOnErg, Double(armedTicks) * 0.5 >= config.startDelay, !stepOffWaitAnnounced, let until = stepOffUntilTick {
+                stepOffWaitAnnounced = true
+                print("🧪 VPM5 🚶 piece ARMED, athlete still OFF the erg — back in \(String(format: "%.1f", Double(until - totalTicks) * 0.5))s (SemperClock-n8e4)")
+            }
+            if (Double(armedTicks) * 0.5 >= config.startDelay && athleteOnErg) || athleteAlreadyPulling {
+                let heldBySteppingOff = stepOffUntilTick != nil
+                stepOffUntilTick = nil
                 rowingTicks = 0
                 dragFactor = 0
                 // SemperClock-mwqp2: a frozen strap keeps REPEATING its last value across an
@@ -1824,6 +1886,8 @@ public final class VirtualPM5 {
                 }
                 if athleteAlreadyPulling, Double(armedTicks) * 0.5 < config.startDelay {
                     logTransition("flywheel start IMMEDIATE — athlete was already stroking through rest (-VirtualPM5RowDuringRest, SC-2rqd); 0x0031 meters now bank during the remaining rest window")
+                } else if heldBySteppingOff {
+                    logTransition("flywheel start (athlete pulls — back on the erg after stepping off \(String(format: "%.1f", config.stepOffSeconds))s, SemperClock-n8e4)")
                 } else {
                     logTransition("flywheel start (athlete pulls)")
                 }
@@ -1991,6 +2055,7 @@ public final class VirtualPM5 {
         frozenDistance = distance
         slaveState = .manual  // by the time the app's GoFinished arrives, the erg self-logged
         if config.rowDuringRest { hasEndedAPieceThisSession = true }  // SC-2rqd: rest-stroking exists only BETWEEN pieces
+        athleteStepsOff(after: "the piece's end")   // SemperClock-n8e4
         // SC-6qh6 (`-VirtualPM5ParkedOdometerUntilStroke`): the head unit keeps showing THIS
         // piece's metres while the next one sits armed at waitToBegin — only a stroke moves the
         // counter (DEVICE 2026-08-16: 26 identical d=500.0 frames across an ~18s armed window).
