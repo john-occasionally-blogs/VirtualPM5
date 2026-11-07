@@ -79,12 +79,14 @@ if VirtualPM5.isRequested {   // launch argument -VirtualPM5
 | `-VirtualPM5Strap <0\|1>` | Whether a strap feeds the erg (drives the per-channel HR sentinel differences). |
 | `-VirtualPM5StartDelay <s>` | Seconds from arm to first pull. |
 | `-VirtualPM5Seed <n>` | Seeded RNG — any run is replayable. |
-| `-VirtualPM5Script '<events>'` | Piece-clock events, e.g. `stop@120,resume@130`, `disconnect@60:8` (mid-piece BLE drop, auto-reconnect 8s later). |
+| `-VirtualPM5Script '<events>'` | Piece-clock events, e.g. `stop@120,resume@130`, `disconnect@60:8` (mid-piece BLE drop, auto-reconnect 8s later), `menu@90` (Menu/Back on the keypad: the piece is gone with no `0x0039`), `end@90` (the erg ends a distance or calorie piece early, with a `0x0039` carrying the partial distance). |
 | `-VirtualPM5SummaryDelay <s>` | Hold the `0x0039` N seconds past `workoutLogged` (summary/save race testing). |
 | `-VirtualPM5InitialOdometer <m>` | Boot with leftover meters — stale until a program's zeros land. |
 | `-VirtualPM5InitialState 'inProgress:<target>m@<current>m'` | Boot already mid-piece (cold adoption); the app's own program is refused as piece-active. |
 | `-VirtualPM5CooldownPiece <m>` | After the app's piece logs, the athlete keys a manual piece → a second legitimate `0x0039`. |
 | `-VirtualPM5IntervalUnbounded` | Reproduce the real erg ignoring the interval count (zombie intervals, terminate-to-end). |
+| `-VirtualPM5HRGapSeconds <a-b>` | One window of session time where the strap reads as no belt: `0x0032[6]` = `0xFF`, FTMS HR = `0x00`. A model; no capture behind it. |
+| `-VirtualPM5EraseProgramOnTeardown` | After a terminate from a parked piece, walk terminate → rearm → waitToBegin; a program landing in that walk gets an offline ACK and is erased to Just Row. Refused beside `-VirtualPM5OfflineACKWhileRowing`. |
 
 Because the profile is per-process, **multiple simulators can each run their own differently-tuned virtual erg** — enabling realistic multi-participant rowing scenarios with zero hardware.
 
