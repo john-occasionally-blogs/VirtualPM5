@@ -89,6 +89,16 @@
 //                               startDelay=2 (explicit knobs win) and pairs with the
 //                               SemperClockApp harness EMOM seed — see the PASS-grep
 //                               contract on that harness block
+//  -VirtualPM5Script '…,menu@<t>'  (SemperClock-2hpb; MODEL, no capture behind this knob) the
+//                               athlete presses Menu/Back on the keypad at piece second t: the
+//                               piece is gone with NO 0x0039, the slave state goes manual and
+//                               the erg reports a plain Just Row. Once per session. t <= 0, a t
+//                               that can never fire, or a second press REFUSES.
+//  -VirtualPM5Script '…,end@<t>'  (SemperClock-b7987; MODEL, no capture behind this knob) the erg
+//                               ends the running distance or calorie piece at piece second t,
+//                               with the normal walk and a 0x0039 carrying the PARTIAL distance.
+//                               t <= 0, a t that can never fire, or a second event REFUSES; a piece
+//                               that ends first prints NOT FIRED.
 //  -VirtualPM5Script '…,disconnect@<t>:<after>'  (SC-7nqt.2.4) mid-workout BLE drop at
 //                               piece-second <t>, auto-reconnect <after>s later (default 8).
 //                               The firmware phase survives the gap so the erg keeps its
@@ -134,6 +144,19 @@
 //                               detector keyed on silence / last-sample-age / sample-count
 //                               reads healthy straight through it. Window starts at
 //                               -VirtualPM5HRHoldAt <s> of ROWING time (default 30).
+//  -VirtualPM5HRGapSeconds <a-b> (SemperClock-5d22; MODEL, no capture behind it) one window of
+//                               ABSENCE on the strap relay: from a to b seconds of SESSION time
+//                               (`totalTicks` x 0.5 s, NOT piece time: a per-piece clock re-arms each
+//                               interval, measured on the hold knob, one event across boundaries) the live
+//                               HR reads as no belt, 0x0032[6] = 0xFF and FTMS[16] = 0x00. The
+//                               stream's timing, the ramp and 0x0039[11] do not change. A bad
+//                               window REFUSES: needs 0 <= a < b <= 3600. The sibling of
+//                               -VirtualPM5HRHoldSeconds, which models the captured flat line.
+//  -VirtualPM5EraseProgramOnTeardown  (SemperClock-knzv; the behaviour is device-confirmed in SC-oi60,
+//                               the state order is from its notes, the 2 s length a MODEL of 2.0-2.5 s)
+//                               a TERMINATE from a parked piece walks terminate → rearm → waitToBegin,
+//                               and a program landing in the walk is ACKed offline, flips 0x0031 byte 6,
+//                               and is erased to Just Row. REFUSES beside -VirtualPM5OfflineACKWhileRowing.
 //  -VirtualPM5DirtyOdometerRejectGoFinished  (SC-o1ur review) rides ON TOP of
 //                               -VirtualPM5DirtyOdometer: while the linger holds workoutRow,
 //                               GoFinished is REJECTED (proper CSAFE reject status, linger
@@ -311,6 +334,12 @@ public final class VirtualPM5 {
         /// that the ramp has climbed well clear of `hrStart` (so the frozen value is
         /// distinguishable from the starting one), early enough to fit inside short fixtures.
         var hrHoldAtSeconds: Double = 30
+        /// SemperClock-5d22: the strap relay's gap, the half `hrHoldSeconds` is not: frames keep arriving at the
+        /// normal rate and the live HR reads as no belt for `hrGapStartSeconds` <= t < `hrGapEndSeconds`, t in
+        /// SESSION seconds for the same reason as the hold. `hrGapEndSeconds` 0 = off (default, no behaviour
+        /// change). A MODEL: a seeded single window, not a measured jitter distribution from any erg.
+        var hrGapStartSeconds: Double = 0
+        var hrGapEndSeconds: Double = 0
         /// Seeded RNG so any run is replayable (seed printed in the session header).
         var seed: UInt64 = 0
         /// Piece-clock script events, e.g. "stop@120,resume@130" (P1b: stop/resume only).
@@ -475,6 +504,13 @@ public final class VirtualPM5 {
         /// surfaces blank instead of holding a stale value and the repro proves the wrong thing.
         /// OFF = bit-identical to today.
         var offlineACKWhileRowing: Bool = false
+        /// SemperClock-knzv: the walk SC-oi60 saw on a real erg. After a TERMINATE from a parked piece the erg reports
+        /// terminate, then rearm, and only then waitToBegin; a program landing in that walk is ACKed offline, flips 0x0031
+        /// byte 6, and is erased to Just Row by the erg's own rearm. Default off, which keeps the captured stale window.
+        /// The behaviour is device-confirmed; the order of the states comes from SC-oi60's notes, not a frame-by-frame
+        /// capture, and 5 frames (2 s) is a MODEL of the device's 2.0-2.5 s. Whether the app holds on these states is
+        /// SemperClock-dio8t's simulator proof. Refuses beside `-VirtualPM5OfflineACKWhileRowing`: two offline games at once measure nothing.
+        var eraseProgramOnTeardown: Bool = false
         /// SC-2rqd: `-VirtualPM5RowDuringRest` — the athlete keeps stroking through rest
         /// windows instead of stepping off between pieces. After each piece ends (and after a
         /// glide-down of `rowDuringRestQuietSeconds`), the 0x0032 stroke-rate byte reads the
@@ -589,6 +625,21 @@ public final class VirtualPM5 {
             return (r > 60 && r < 600) ? (r, nil) : (fallback, r)
         }
 
+        /// SemperClock-ku11: an explicit pace of 62 IS the tuned window, so it does not detune -VirtualPM5RIRTPullDuringRest.
+        /// The gate always passes a pace; without this it could never reach the armed scenario. Any other explicit pace
+        /// detunes, including a refused one, which resolves to the fallback.
+        static func pullDuringRestPaceOverridden(explicitPace: Bool, resolvedPace: Double) -> Bool {
+            explicitPace && resolvedPace != 62
+        }
+
+        /// SemperClock-5d22: `a-b` seconds, 0 <= a < b <= 3600. nil = refused, never clamped into a different window.
+        static func parseHRGapWindow(_ raw: String?) -> (start: Double, end: Double)? {
+            // One '-' leaves no room for a negative a, and NaN or infinity fail the comparisons.
+            guard let parts = raw?.split(separator: "-", omittingEmptySubsequences: false), parts.count == 2,
+                  let a = Double(parts[0]), let b = Double(parts[1]), a < b, b <= 3600 else { return nil }
+            return (a, b)
+        }
+
         public static func fromLaunchArguments() -> Config {
             var c = Config()
             let d = UserDefaults.standard  // NSArgumentDomain carries -Key value pairs
@@ -665,7 +716,7 @@ public final class VirtualPM5 {
             // erg flywheel-starts ~2s into the rest window and rows real meters DURING rest —
             // the early pull the app's counting-gate must discard. Explicit overrides win.
             if ProcessInfo.processInfo.arguments.contains("-VirtualPM5RIRTPullDuringRest") {
-                let paceOverridden = d.object(forKey: "VirtualPM5Pace") != nil
+                let paceOverridden = pullDuringRestPaceOverridden(explicitPace: d.object(forKey: "VirtualPM5Pace") != nil, resolvedPace: c.paceSecondsPer500)
                 let delayOverridden = d.object(forKey: "VirtualPM5StartDelay") != nil
                 if !paceOverridden { c.paceSecondsPer500 = 62 }
                 if !delayOverridden { c.startDelay = 2 }
@@ -705,6 +756,13 @@ public final class VirtualPM5 {
             if ProcessInfo.processInfo.arguments.contains("-VirtualPM5OfflineACKWhileRowing") {
                 c.offlineACKWhileRowing = true
             }
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5EraseProgramOnTeardown") {
+                if c.offlineACKWhileRowing {
+                    print("🧪 VPM5 ❌ -VirtualPM5EraseProgramOnTeardown REFUSED beside -VirtualPM5OfflineACKWhileRowing (two offline games at once measure nothing) — erase OFF (SemperClock-knzv)")
+                } else {
+                    c.eraseProgramOnTeardown = true
+                }
+            }
             // SC-2rqd: athlete keeps stroking through rest windows (never steps off between
             // pieces). Quiet override windowed 0–60s; 0 = never-stops (see the Config doc).
             if ProcessInfo.processInfo.arguments.contains("-VirtualPM5RowDuringRest") {
@@ -731,6 +789,18 @@ public final class VirtualPM5 {
                 c.hrHoldSeconds = min(3600, max(0, d.double(forKey: "VirtualPM5HRHoldSeconds")))
                 if d.object(forKey: "VirtualPM5HRHoldAt") != nil {
                     c.hrHoldAtSeconds = min(3600, max(0, d.double(forKey: "VirtualPM5HRHoldAt")))
+                }
+            }
+            // SemperClock-5d22: the flag with a value UserDefaults will not carry (none, or one starting '-') must
+            // refuse too, not run the default athlete, so the argv is read as well as the argument domain.
+            if d.object(forKey: "VirtualPM5HRGapSeconds") != nil
+                || ProcessInfo.processInfo.arguments.contains("-VirtualPM5HRGapSeconds") {
+                let raw = d.string(forKey: "VirtualPM5HRGapSeconds")
+                if let window = parseHRGapWindow(raw) {
+                    c.hrGapStartSeconds = window.start
+                    c.hrGapEndSeconds = window.end
+                } else {
+                    print("🧪 VPM5 ❌ -VirtualPM5HRGapSeconds '\(raw ?? "no value")' REFUSED — needs a-b seconds, 0 <= a < b <= 3600; HR gap OFF (SemperClock-5d22)")
                 }
             }
             // SC-qv39: spindown residual — the ERG DAY 2026-08-14 dirty re-arm (d=19.8): the
@@ -770,10 +840,39 @@ public final class VirtualPM5 {
         /// timer), so the erg keeps its running piece — exactly like real hardware
         /// during a transient disconnect (SC-eqzh reconnect half / SC-dxsm analog).
         case disconnect(atPieceSeconds: Double, reconnectAfter: Double)
+        /// SemperClock-2hpb: the athlete presses Menu/Back on the erg's own keypad at piece second t. The running
+        /// piece is gone with NO 0x0039 and the erg drops to a plain Just Row: the shape the app's out-of-band clear
+        /// detector watches for (a MODEL of a device report, no capture behind this knob). Refuses t <= 0, a t that
+        /// can never fire, and a second press.
+        case menu(atPieceSeconds: Double)
+        /// SemperClock-b7987: the erg ends the piece the app programmed, EARLY, at piece second t: a type-0x03 or 0x0A
+        /// 0x0039 with the PARTIAL distance, the walk any piece end takes. A witness for the app's bank (it does not
+        /// cure it) and a MODEL of an END press, no capture behind it. Distance and calorie pieces only: on any other
+        /// piece it prints and stays. Refuses t <= 0, a t that can never fire, and a second event. Whether t lands
+        /// before the target is unknown at parse, since the app programs the piece later: a piece that ends first prints NOT FIRED.
+        case end(atPieceSeconds: Double)
 
         static func parse(_ spec: String) -> [ScriptEvent] {
-            spec.split(separator: ",").compactMap { token in
+            var menuScripted = false
+            var endScripted = false
+            return spec.split(separator: ",").compactMap { token in
                 let parts = token.split(separator: "@")
+                if parts.first == "menu" {
+                    guard parts.count == 2, let t = Double(parts[1]), t > 0, t.isFinite, !menuScripted else {
+                        print("🧪 VPM5 ❌ script event '\(token)' REFUSED — menu@t needs t > 0 piece seconds, once; that press is not scripted (SemperClock-2hpb)")
+                        return nil
+                    }
+                    menuScripted = true
+                    return .menu(atPieceSeconds: t)
+                }
+                if parts.first == "end" {
+                    guard parts.count == 2, let t = Double(parts[1]), t > 0, t.isFinite, !endScripted else {
+                        print("🧪 VPM5 ❌ script event '\(token)' REFUSED — end@t needs t > 0 piece seconds, once; no early end is scripted (SemperClock-b7987)")
+                        return nil
+                    }
+                    endScripted = true
+                    return .end(atPieceSeconds: t)
+                }
                 guard parts.count == 2 else { return nil }
                 let name = parts[0]
                 // disconnect carries a "t:reconnectAfter" tail (reconnectAfter defaults
@@ -789,7 +888,7 @@ public final class VirtualPM5 {
                 case "stop": return .stop(atPieceSeconds: t)
                 case "resume": return .resume(atPieceSeconds: t)
                 default:
-                    print("🧪 VPM5 ⚠️ unknown script event '\(token)' (P1 supports stop@/resume@, P2 disconnect@t:after)")
+                    print("🧪 VPM5 ⚠️ unknown script event '\(token)' (P1 supports stop@/resume@, P2 disconnect@t:after, menu@t, end@t)")
                     return nil
                 }
             }
@@ -854,6 +953,16 @@ public final class VirtualPM5 {
 
     private var phase: Phase = .idle
     private var slaveState: CSAFESlaveState = .ready
+    /// SemperClock-knzv: the settle oracle SC-oi60 owed, read by a golden here and by a rig from the line
+    /// `logSettleOracle` prints. The distance a piece records can look right on an unprogrammed erg, so the proof of
+    /// an install is what the wire says: the workout type on 0x0031 byte 6 (0x03 vs 0x01), and the slave state the
+    /// last response carried (an offline ACK means the definition did not take).
+    private(set) var lastACKSlaveState: CSAFESlaveState?
+    var armedWireType: UInt8 { workoutTypeByte }
+    private func logSettleOracle() {
+        print("🧪 VPM5 📋 SemperClock-knzv settle oracle: wire type 0x\(String(format: "%02X", armedWireType)), last ACK state \(lastACKSlaveState.map { "\($0)" } ?? "none")")
+    }
+    private var inUseFromEmbeddedGoInUse = false   // SemperClock-2hpb: only that in-use rejects a bare GoInUse
     /// Toggle latch: accepted responses use the FLIPPED value and keep it; rejects
     /// repeat the current value (captured rule, 30/30 responses).
     private var toggleBit = false
@@ -953,6 +1062,23 @@ public final class VirtualPM5 {
         return sessionSeconds >= config.hrHoldAtSeconds
             && sessionSeconds < config.hrHoldAtSeconds + config.hrHoldSeconds
     }
+    /// SemperClock-5d22: inside the strap relay's gap. `totalTicks`, for the reason `hrHoldActive` documents.
+    private var hrGapActive: Bool {
+        guard config.hrGapEndSeconds > 0 else { return false }
+        let sessionSeconds = Double(totalTicks) * 0.5
+        return sessionSeconds >= config.hrGapStartSeconds && sessionSeconds < config.hrGapEndSeconds
+    }
+    private var hrGapLogged = false
+    private var hrGapReleaseLogged = false
+    private func logHRGapTransition() {
+        if hrGapActive, !hrGapLogged {
+            hrGapLogged = true
+            logTransition("SemperClock-5d22 HR GAP engaged at \(Double(totalTicks) * 0.5)s of session time — no belt on 0x0032[6] / FTMS[16] until \(config.hrGapEndSeconds)s")
+        } else if !hrGapActive, hrGapLogged, !hrGapReleaseLogged {
+            hrGapReleaseLogged = true
+            logTransition("SemperClock-5d22 HR GAP released at \(Double(totalTicks) * 0.5)s — live HR reads \(Int(currentHR)) bpm")
+        }
+    }
     private var armedTicks = 0
     /// SemperClock-n8e4 (`-VirtualPM5StepOffSeconds`): the tick at which the stepped-off athlete is back on the erg —
     /// set at each piece end, cleared by the flywheel start it held. nil = on the erg (always nil with the knob off).
@@ -1031,7 +1157,10 @@ public final class VirtualPM5 {
     /// the delay. nil unless a disconnect event is scripted, so the seam is inert on
     /// device / without -VirtualPM5Script.
     private let onDisconnectRequest: ((TimeInterval) -> Void)?
+    private var teardownWalkActive = false   // SemperClock-knzv
     private var scriptDisconnectFired = false
+    private var scriptMenuFired = false
+    private var scriptEndFired = false
     private var accumulator = CSAFEResponseAccumulator()
     private var tickTimer: Timer?
     public private(set) var isChannelOpen = false
@@ -1056,7 +1185,7 @@ public final class VirtualPM5 {
         if let refused = config.refusedPaceRequest {
             print("🧪 VPM5 ⚠️ -VirtualPM5Pace \(refused) is OUTSIDE the valid band (60 < pace < 600 s/500m) — IGNORED. Rowing at \(config.paceSecondsPer500)s/500m instead. This run is NOT the pace you asked for. (SemperClock-p9h7z)")
         }
-        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) hrRecovery=\(config.hrRecoveryRestingBPM > 0 ? "\(config.hrRecoveryRestingBPM)bpm/tau\(Int(config.hrRecoveryTau))s" : "off") kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off") stepOff=\(config.stepOffSeconds > 0 ? String(format: "%.1fs", config.stepOffSeconds) : "off")")
+        print("🧪 VPM5 session start seed=\(config.seed) pace=\(config.paceSecondsPer500)s/500m spm=\(config.strokeRate) hr=\(config.hrStart)-\(config.hrPeak) strap=\(config.strapPresent) startDelay=\(config.startDelay)s script=\(config.script) hrRecovery=\(config.hrRecoveryRestingBPM > 0 ? "\(config.hrRecoveryRestingBPM)bpm/tau\(Int(config.hrRecoveryTau))s" : "off") kick=\(config.finishKickPace > 0 ? "\(config.finishKickPace)s@\(config.finishKickAfterSeconds)s" : "off") stepOff=\(config.stepOffSeconds > 0 ? String(format: "%.1fs", config.stepOffSeconds) : "off") hrGap=\(config.hrGapEndSeconds > 0 ? "\(config.hrGapStartSeconds)-\(config.hrGapEndSeconds)s" : "off")")
         if config.initialOdometerMeters > 0 {
             // P2b: leftover values from an earlier bout, visible in the idle 0x0031
             // stream and through the program-accept stale window until armed zeros
@@ -1290,8 +1419,17 @@ public final class VirtualPM5 {
                 print("🧪 VPM5 ❌ GoIdle rejected (slave \(slaveState))")
             }
         case 0x85: // GoInUse (Just Row follow-up)
-            slaveState = .inUse
-            respond(reject: false, echo: [])
+            // SemperClock-2hpb: a tripwire. Real firmware rejected the follow-up to a frame that already ended in
+            // GoInUse (SC-pxq6's notes; no capture kept), so that one shape rejects and the state stays. Every other
+            // bare GoInUse is accepted, unmeasured on any erg: after a Just Row it may be the real activation.
+            if slaveState == .inUse, inUseFromEmbeddedGoInUse {
+                respond(reject: true, echo: [])
+                print("🧪 VPM5 ❌ bare GoInUse rejected: this frame's in-use came from an embedded GoInUse (SemperClock-2hpb)")
+            } else {
+                slaveState = .inUse
+                inUseFromEmbeddedGoInUse = false
+                respond(reject: false, echo: [])
+            }
         case 0x80: // GETSTATUS probe
             respond(reject: false, echo: [])
         default:
@@ -1363,6 +1501,8 @@ public final class VirtualPM5 {
             return
         }
 
+        if let t = workoutType, eraseProgramLandingMidWalk(wireType: t, echo: [0x76, UInt8(ids.count)] + ids) { return }
+
         // Captured firmware truth: programming during an ACTIVE piece → F1 99 reject
         // (all piece types, BOTH dialects — see pieceActiveRejectsPrograms).
         if workoutType != nil, pieceActiveRejectsPrograms {
@@ -1418,6 +1558,7 @@ public final class VirtualPM5 {
                 return
             }
         }
+        if body.first == 0x21, eraseProgramLandingMidWalk(wireType: 0x03, echo: []) { return }
         if let first = body.first, first == 0x21 || first == 0x1A, pieceActiveRejectsPrograms {
             rejectProgramPieceActive()
             return
@@ -1432,6 +1573,7 @@ public final class VirtualPM5 {
             }
             respond(reject: false, echo: [])
             slaveState = .inUse   // frame ends in GoInUse
+            inUseFromEmbeddedGoInUse = true
             acceptProgram(.distance(meters: meters))
             return
         }
@@ -1464,6 +1606,20 @@ public final class VirtualPM5 {
         case .rowing, .ended, .resting: return true  // .resting: mid-interval, programs reject (F1 99)
         default: return false
         }
+    }
+
+    /// SemperClock-knzv: a program landing in the teardown walk. The erg takes it at the CSAFE layer but with an offline
+    /// ACK (not a reject: the app reads .ok and has only the state to go on), byte 6 flips to the programmed type, and the
+    /// walk's end at `.clearToIdle` erases it. Returns false when no walk is running, so the normal routes apply.
+    private func eraseProgramLandingMidWalk(wireType: UInt8, echo: [UInt8]) -> Bool {
+        guard teardownWalkActive else { return false }
+        let previous = slaveState
+        slaveState = .offline
+        respond(reject: false, echo: echo)
+        slaveState = previous
+        lastValues.type = wireType
+        logTransition("SemperClock-knzv program landed MID-WALK: type 0x\(String(format: "%02X", wireType)) on the wire, offline ACK, the rearm will erase it")
+        return true
     }
 
     private func rejectProgramPieceActive() {
@@ -1571,9 +1727,12 @@ public final class VirtualPM5 {
         case .logged, .ended:
             // Captured: terminate-from-logged zeroes everything after a short stale window.
             lastValues = (frozenElapsed, frozenDistance, workoutTypeByte)
-            phase = .staleWindow(framesLeft: 2, then: .clearToIdle)
+            teardownWalkActive = config.eraseProgramOnTeardown
+            phase = .staleWindow(framesLeft: teardownWalkActive ? 5 : 2, then: .clearToIdle)
             slaveState = .ready
-            logTransition("TERMINATE from logged park → stale window → cleared idle")
+            logTransition(teardownWalkActive
+                ? "TERMINATE from logged park → teardown walk, terminate → rearm → waitToBegin (SemperClock-knzv)"
+                : "TERMINATE from logged park → stale window → cleared idle")
         case .rowing(let piece), .resting(let piece, _):
             // SC-7nqt.12: an UNBOUNDED native interval ends ONLY here — the real erg ran
             // zombie intervals past the programmed count until the athlete hit TERMINATE,
@@ -1629,12 +1788,14 @@ public final class VirtualPM5 {
 
     private func acceptJustRow() {
         // Captured: Just Row resets counters at ENTRY (no stale window in LOG15).
+        teardownWalkActive = false   // SemperClock-0vv1w: it arms from here and never reaches .clearToIdle
         resetPieceCounters()
         workoutTypeByte = 0x01
         durationBytes = (0, 0x80)
         phase = .armed(.justRow)
         armedTicks = 0
         logTransition("Just Row armed (counters reset at entry, no target, no summary)")
+        logSettleOracle()
     }
 
     // MARK: - CSAFE responses
@@ -1648,6 +1809,7 @@ public final class VirtualPM5 {
         let status: UInt8 = (toggleBit ? 0x80 : 0x00)
             | (reject ? 0x10 : 0x00)
             | (slaveState.rawValue & 0x0F)
+        lastACKSlaveState = CSAFESlaveState(rawValue: status & 0x0F)
         let frame = CSAFEFrameCodec.buildFrame(contents: [status] + echo)
         let deliver = { [weak self] in
             guard let self, self.isChannelOpen else { return }
@@ -1666,6 +1828,7 @@ public final class VirtualPM5 {
 
     func tick() {
         totalTicks += 1
+        logHRGapTransition()
         // SC-2rqd (`-VirtualPM5RowDuringRest`): athlete-continuity clock — runs BEFORE
         // advancePhase so an arm landing this tick sees the already-stroking athlete and
         // flywheel-starts immediately. Reset only by an actually-running piece; every parked/
@@ -1819,12 +1982,14 @@ public final class VirtualPM5 {
                     }
                     armedTicks = 0
                     phase = .armed(piece)
+                    logSettleOracle()
                     if let hold = parkedOdometerHold {
                         logTransition("armed (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value)) — PARKED ODOMETER: wire distance holds at \(String(format: "%.1f", hold))m until the first stroke (SC-6qh6 device truth), NOT the armed zeros")
                     } else {
                         logTransition("armed (type 0x\(String(format: "%02X", workoutTypeByte)), duration \(durationBytes.value))")
                     }
                 case .clearToIdle:
+                    teardownWalkActive = false
                     resetPieceCounters()
                     workoutTypeByte = 0x01
                     durationBytes = (0, 0x80)
@@ -1899,6 +2064,7 @@ public final class VirtualPM5 {
             intervalTotalElapsed += 0.5   // SC-7nqt.11: whole-session clock (wire `elapsed` is per-interval)
             intervalWorkElapsed += 0.5    // SC-fadm: WORK-only (NOT incremented in `.resting`)
             applyScript()
+            guard case .rowing = phase else { break }   // SemperClock-2hpb, -b7987: a script event just ended this tick's piece
             // SC-0wi8: a WEDGED erg keeps streaming and keeps its piece clock running, but the
             // rowing engine is gone: distance stops accruing and no valid pace is produced. The
             // athlete is still pulling — this is the erg's failure, not the athlete stopping,
@@ -2051,6 +2217,10 @@ public final class VirtualPM5 {
     /// Shared end-walk entry: freeze the wire values, mark the erg self-logged,
     /// and start the 3-4 frame workoutEnd window (identical for all piece types).
     private func endPiece(_ piece: Piece, note: String) {
+        if !scriptEndFired, let t = config.script.lazy.compactMap({ (e: ScriptEvent) -> Double? in
+            if case .end(let t) = e { return t } else { return nil } }).first {
+            print("🧪 VPM5 ⚠️ script end@\(t) NOT FIRED: this piece ended first, at \(String(format: "%.1f", elapsed))s (SemperClock-b7987)")
+        }
         frozenElapsed = elapsed
         frozenDistance = distance
         slaveState = .manual  // by the time the app's GoFinished arrives, the erg self-logged
@@ -2082,6 +2252,23 @@ public final class VirtualPM5 {
             case .resume(let t) where scriptStopped && elapsed >= t:
                 scriptStopped = false
                 print("🧪 VPM5 🎬 script: athlete RESUMED at \(String(format: "%.1f", elapsed))s")
+            case .menu(let t) where !scriptMenuFired && elapsed >= t:
+                scriptMenuFired = true
+                // Keypad, as in serviceCooldown: not a CSAFE exchange, so no response frame. And no endPiece: the
+                // walk to .logged is what writes a 0x0039, so skipping it is what makes this a Menu/Back.
+                slaveState = .manual
+                print("🧪 VPM5 🎬 script: athlete pressed Menu/Back at \(String(format: "%.1f", elapsed))s — piece gone, no 0x0039 (SemperClock-2hpb)")
+                acceptJustRow()
+            case .end(let t) where !scriptEndFired && elapsed >= t:
+                scriptEndFired = true
+                guard case .rowing(let piece) = phase else { break }
+                switch piece {
+                case .distance, .calories:
+                    // endPiece, not the snap-to-target branch, so the summary carries the PARTIAL distance.
+                    endPiece(piece, note: "script: the erg ended the piece EARLY at \(String(format: "%.1f", elapsed))s, \(String(format: "%.1f", distance))m (SemperClock-b7987)")
+                default:
+                    print("🧪 VPM5 ⚠️ script end@\(t) NOT FIRED: this piece is not a distance or calorie piece (SemperClock-b7987)")
+                }
             case .disconnect(let t, let after) where !scriptDisconnectFired && elapsed >= t:
                 scriptDisconnectFired = true
                 print("🧪 VPM5 🔌 script: BLE DROP at \(String(format: "%.1f", elapsed))s — link down, auto-reconnect in \(String(format: "%.0f", after))s (firmware phase survives)")
@@ -2142,7 +2329,10 @@ public final class VirtualPM5 {
                 return (elapsed, distance, 0x0B, 0, 1, workoutTypeByte)
             }
             return (elapsed, distance, 0x00, 0, 0, workoutTypeByte)
-        case .staleWindow:
+        case .staleWindow(let framesLeft, _):
+            if teardownWalkActive {   // SemperClock-knzv: terminate, then rearm; waitToBegin only once it is over
+                return (lastValues.elapsed, lastValues.distance, framesLeft > 2 ? 0x0B : 0x0D, 0, 1, lastValues.type)
+            }
             if terminateFlashPending {
                 terminateFlashPending = false
                 return (lastValues.elapsed, lastValues.distance, 0x0B, 0, 1, lastValues.type)
@@ -2376,7 +2566,7 @@ public final class VirtualPM5 {
         a += u16LE(watts)                                       // inst power
         a += u16LE(watts)                                       // avg power
         a += u16LE(dragFactor)                                  // resistance = drag
-        a.append(config.strapPresent && currentHR > 0 ? UInt8(clamping: Int(currentHR)) : 0x00)
+        a.append(config.strapPresent && currentHR > 0 && !hrGapActive ? UInt8(clamping: Int(currentHR)) : 0x00)
         a += u16LE(Int(v.elapsed))                              // elapsed, whole s
         emit(Self.ftmsRowerDataUUID, Data(a))
         // Variant B: flags 0x0100 (10B) — stroke rate + count, energy; perMin always 0xFF.
@@ -2604,7 +2794,7 @@ public final class VirtualPM5 {
     }
 
     private func strapByteFor0032() -> UInt8 {
-        guard config.strapPresent, currentHR > 0 else { return 0xFF }  // 0xFF = no belt (captured)
+        guard config.strapPresent, currentHR > 0, !hrGapActive else { return 0xFF }  // 0xFF = no belt (captured)
         return UInt8(clamping: Int(currentHR))
     }
 
