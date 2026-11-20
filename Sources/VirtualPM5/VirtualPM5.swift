@@ -99,6 +99,13 @@
 //                               with the normal walk and a 0x0039 carrying the PARTIAL distance.
 //                               t <= 0, a t that can never fire, or a second event REFUSES; a piece
 //                               that ends first prints NOT FIRED.
+//  -VirtualPM5Script '…,lose@<s>'  (SemperClock-q9jho; MODEL of an END STATE, not of a mechanism) an armed piece
+//                               that has sat unstarted for <s> s is silently gone: the erg falls back to a plain armed
+//                               Just Row (0 m, type 0x01, waitToBegin) with no ACK and no 0x0039 — what tether-b846/b888
+//                               show after a lost program, and what a real 2026-11-19 RFT round 2 ran (0x0039 type 1).
+//                               Once per session: a piece the athlete starts within <s> is never touched, so with the
+//                               floor between rows the FIRST long-armed piece (round 2) loses it. t <= 0 or a second
+//                               lose@ REFUSES.
 //  -VirtualPM5Script '…,disconnect@<t>:<after>'  (SC-7nqt.2.4) mid-workout BLE drop at
 //                               piece-second <t>, auto-reconnect <after>s later (default 8).
 //                               The firmware phase survives the gap so the erg keeps its
@@ -157,6 +164,11 @@
 //                               a TERMINATE from a parked piece walks terminate → rearm → waitToBegin,
 //                               and a program landing in the walk is ACKed offline, flips 0x0031 byte 6,
 //                               and is erased to Just Row. REFUSES beside -VirtualPM5OfflineACKWhileRowing.
+//  -VirtualPM5TerminateEchoesLoggedPark  (SemperClock-q9jho; CAPTURED: 13/13 real-PM5 tether frames) rides ON
+//                               -VirtualPM5EraseProgramOnTeardown: the FIRST 0x0031 after a TERMINATE from the logged park
+//                               still reports the park (state 0x0C, the previous piece's distance and type) before the
+//                               walk's states. A consumer that releases a held program on workoutLogged sends it into
+//                               the walk. Without the erase knob it REFUSES (echo off).
 //  -VirtualPM5DirtyOdometerRejectGoFinished  (SC-o1ur review) rides ON TOP of
 //                               -VirtualPM5DirtyOdometer: while the linger holds workoutRow,
 //                               GoFinished is REJECTED (proper CSAFE reject status, linger
@@ -511,6 +523,9 @@ public final class VirtualPM5 {
         /// capture, and 5 frames (2 s) is a MODEL of the device's 2.0-2.5 s. Whether the app holds on these states is
         /// SemperClock-dio8t's simulator proof. Refuses beside `-VirtualPM5OfflineACKWhileRowing`: two offline games at once measure nothing.
         var eraseProgramOnTeardown: Bool = false
+        /// SemperClock-q9jho: the first 0x0031 after a TERMINATE from the logged park repeats the park (0x0C, the previous piece's
+        /// distance and type) — every real-PM5 tether shows it (13/13 frames). Only with `eraseProgramOnTeardown`; OFF = today.
+        var terminateEchoesLoggedPark: Bool = false
         /// SC-2rqd: `-VirtualPM5RowDuringRest` — the athlete keeps stroking through rest
         /// windows instead of stepping off between pieces. After each piece ends (and after a
         /// glide-down of `rowDuringRestQuietSeconds`), the 0x0032 stroke-rate byte reads the
@@ -763,6 +778,14 @@ public final class VirtualPM5 {
                     c.eraseProgramOnTeardown = true
                 }
             }
+            if ProcessInfo.processInfo.arguments.contains("-VirtualPM5TerminateEchoesLoggedPark") {
+                if c.eraseProgramOnTeardown {
+                    c.terminateEchoesLoggedPark = true
+                    print("🧪 VPM5 🪞 -VirtualPM5TerminateEchoesLoggedPark ON: the first frame after a TERMINATE from the logged park repeats the park (SemperClock-q9jho)")
+                } else {
+                    print("🧪 VPM5 ❌ -VirtualPM5TerminateEchoesLoggedPark REFUSED without -VirtualPM5EraseProgramOnTeardown (the echo only matters to a walk that can erase) — echo OFF (SemperClock-q9jho)")
+                }
+            }
             // SC-2rqd: athlete keeps stroking through rest windows (never steps off between
             // pieces). Quiet override windowed 0–60s; 0 = never-stops (see the Config doc).
             if ProcessInfo.processInfo.arguments.contains("-VirtualPM5RowDuringRest") {
@@ -851,12 +874,25 @@ public final class VirtualPM5 {
         /// piece it prints and stays. Refuses t <= 0, a t that can never fire, and a second event. Whether t lands
         /// before the target is unknown at parse, since the app programs the piece later: a piece that ends first prints NOT FIRED.
         case end(atPieceSeconds: Double)
+        /// SemperClock-q9jho: an armed piece left unstarted for `afterArmedSeconds` is silently gone — the erg falls back to a
+        /// plain armed Just Row (0 m, type 0x01, waitToBegin), no ACK, no 0x0039. A MODEL of the END STATE the b846/b888 tethers
+        /// captured after a lost program, not of how it was lost. Once per session; refuses t <= 0 and a second lose@.
+        case lose(afterArmedSeconds: Double)
 
         static func parse(_ spec: String) -> [ScriptEvent] {
             var menuScripted = false
             var endScripted = false
+            var loseScripted = false
             return spec.split(separator: ",").compactMap { token in
                 let parts = token.split(separator: "@")
+                if parts.first == "lose" {
+                    guard parts.count == 2, let t = Double(parts[1]), t > 0, t.isFinite, !loseScripted else {
+                        print("🧪 VPM5 ❌ script event '\(token)' REFUSED — lose@s needs s > 0 armed seconds, once; no piece is lost (SemperClock-q9jho)")
+                        return nil
+                    }
+                    loseScripted = true
+                    return .lose(afterArmedSeconds: t)
+                }
                 if parts.first == "menu" {
                     guard parts.count == 2, let t = Double(parts[1]), t > 0, t.isFinite, !menuScripted else {
                         print("🧪 VPM5 ❌ script event '\(token)' REFUSED — menu@t needs t > 0 piece seconds, once; that press is not scripted (SemperClock-2hpb)")
@@ -1161,6 +1197,8 @@ public final class VirtualPM5 {
     private var scriptDisconnectFired = false
     private var scriptMenuFired = false
     private var scriptEndFired = false
+    private var scriptLoseFired = false        // SemperClock-q9jho
+    private var loggedParkEchoPending = false  // SemperClock-q9jho
     private var accumulator = CSAFEResponseAccumulator()
     private var tickTimer: Timer?
     public private(set) var isChannelOpen = false
@@ -1728,6 +1766,7 @@ public final class VirtualPM5 {
             // Captured: terminate-from-logged zeroes everything after a short stale window.
             lastValues = (frozenElapsed, frozenDistance, workoutTypeByte)
             teardownWalkActive = config.eraseProgramOnTeardown
+            if case .logged = phase { loggedParkEchoPending = config.terminateEchoesLoggedPark }   // SemperClock-q9jho
             phase = .staleWindow(framesLeft: teardownWalkActive ? 5 : 2, then: .clearToIdle)
             slaveState = .ready
             logTransition(teardownWalkActive
@@ -2011,6 +2050,17 @@ public final class VirtualPM5 {
 
         case .armed(let piece):
             armedTicks += 1
+            // SemperClock-q9jho (`lose@s`): the armed piece is silently gone before the first stroke.
+            let armedPieceIsJustRow: Bool = { if case .justRow = piece { return true } else { return false } }()
+            let loseAfter: Double? = config.script.lazy.compactMap { event -> Double? in
+                if case .lose(let t) = event { return t } else { return nil }
+            }.first
+            if !scriptLoseFired, !armedPieceIsJustRow, let loseAfter, Double(armedTicks) * 0.5 >= loseAfter {
+                scriptLoseFired = true
+                print("🧪 VPM5 🎬 script: the armed \(piece) piece is LOST after \(String(format: "%.1f", Double(armedTicks) * 0.5))s unstarted — the erg falls back to a plain Just Row, no ACK, no 0x0039 (SemperClock-q9jho)")
+                acceptJustRow()
+                break
+            }
             // SC-2rqd: an athlete stroking through the rest window is already on the flywheel
             // when the program lands — no startDelay wind-up. This is what banks 0x0031 meters
             // into the armed piece during the remaining rest (the SC-qq4w shape).
@@ -2330,6 +2380,11 @@ public final class VirtualPM5 {
             }
             return (elapsed, distance, 0x00, 0, 0, workoutTypeByte)
         case .staleWindow(let framesLeft, _):
+            if loggedParkEchoPending {   // SemperClock-q9jho: the erg's pre-TERMINATE report is still on the wire
+                loggedParkEchoPending = false
+                logTransition("SemperClock-q9jho echo: first frame after TERMINATE still reads the logged park (0x0C, \(String(format: "%.1f", lastValues.distance))m, type 0x\(String(format: "%02X", lastValues.type)))")
+                return (lastValues.elapsed, lastValues.distance, 0x0C, 0, 1, lastValues.type)
+            }
             if teardownWalkActive {   // SemperClock-knzv: terminate, then rearm; waitToBegin only once it is over
                 return (lastValues.elapsed, lastValues.distance, framesLeft > 2 ? 0x0B : 0x0D, 0, 1, lastValues.type)
             }
